@@ -1866,7 +1866,7 @@ elif nav == "🤖  Models":
                                 xaxis_title="Normalised Importance",**_PL)
             st.plotly_chart(figFI, use_container_width=True)
         else:
-            st.info("Feature importance not available for this model type (e.g., KNN).")
+            st.info("Feature importance not available for this model type.")
 
         # ── CV bars ──────────────────────────────────────────────────────────
         sec("📊 Cross-Validation RMSE ± Std  (GroupKFold · 5 folds)")

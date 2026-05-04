@@ -99,7 +99,7 @@ This problem is non-trivial for three reasons:
 | Feature | Details |
 |---------|---------|
 | **26 engineered features** | Weather, satellite/land, geographic, temporal, interaction |
-| **8–9 regression models** | Linear, Ridge, Lasso, Decision Tree, Random Forest, Gradient Boosting, KNN, XGBoost*, LightGBM* |
+| **7–8 regression models** | Linear, Ridge, Lasso, Decision Tree Regressor, Random Forest Regressor, Gradient Boosting, XGBoost*, LightGBM* |
 | **GridSearchCV tuning** | Hyperparameters optimised for every non-linear model |
 | **GroupKFold city split** | Entire cities assigned to either train or test — real generalisation |
 | **StandardScaler** | Zero-mean unit-variance scaling applied before all models |
@@ -258,8 +258,8 @@ Compute Baseline
   │
   ▼
 For each model in {Linear Regression, Ridge, Lasso,
-                   Decision Tree, Random Forest, Gradient Boosting,
-                   KNN, XGBoost, LightGBM}:
+                   Decision Tree Regressor, Random Forest Regressor,
+                   Gradient Boosting, XGBoost, LightGBM}:
   │
   ├─ Has parameter grid? ──YES──► GridSearchCV
   │                               (GroupKFold inner CV, 5 folds, city-aware)
@@ -535,7 +535,6 @@ Best estimator → evaluated on held-out test cities
 | Decision Tree | max_depth ∈ {3,5,8,None} × min_samples_leaf ∈ {1,2,5} |
 | Random Forest | n_estimators ∈ {100,200} × max_depth ∈ {5,8,None} × min_samples_leaf ∈ {1,2} |
 | Gradient Boosting | n_estimators ∈ {100,200} × lr ∈ {0.05,0.1} × max_depth ∈ {3,5} |
-| KNN | k ∈ {3,5,7,11} × weights ∈ {uniform, distance} |
 | XGBoost | n_estimators × lr × max_depth × subsample |
 | LightGBM | n_estimators × lr × max_depth |
 
@@ -631,7 +630,6 @@ satellite + geographic data), predict a continuous target **y** (UHI intensity i
 | **Decision Tree** | CART (axis-aligned splits minimising MSE) | max_depth, min_samples_leaf |
 | **Ensemble Bagging** | Random Forest | n_estimators, max_depth, min_samples_leaf |
 | **Ensemble Boosting** | Gradient Boosting, XGBoost, LightGBM | n_estimators, learning_rate, max_depth |
-| **Instance-Based** | K-Nearest Neighbors | k, distance weighting |
 
 ### 5.2 Feature Engineering
 
@@ -735,7 +733,7 @@ For each feature i:
 Fitted only on training data; applied to test data using training statistics —
 prevents test information from influencing the scaler (data leakage).
 
-Required for: Ridge, Lasso, KNN (distance-based), Linear Regression.
+Required for: Ridge, Lasso, Linear Regression.
 Beneficial for: all gradient-based models.
 
 ### 5.9 Feature Importance

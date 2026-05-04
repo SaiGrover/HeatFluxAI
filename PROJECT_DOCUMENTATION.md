@@ -253,7 +253,6 @@ Each step checks whether its output file already exists. If it does, that step i
 | Decision Tree | `max_depth`, `min_samples_leaf` |
 | Random Forest | `n_estimators`, `max_depth`, `min_samples_leaf` |
 | Gradient Boosting | `n_estimators`, `learning_rate`, `max_depth` |
-| K-Nearest Neighbors | `n_neighbors`, `weights` |
 | XGBoost | `n_estimators`, `learning_rate`, `max_depth`, `subsample` |
 | LightGBM | `n_estimators`, `learning_rate`, `max_depth` |
 
@@ -583,10 +582,9 @@ Rows where no 8-day composite falls within ±8 days (extended cloudy periods, MO
 | Linear Regression | Linear | Unregularised baseline |
 | Ridge Regression | Linear + L2 | Controls multicollinearity; α tuned |
 | Lasso Regression | Linear + L1 | Sparse solution; implicit feature selection; α tuned |
-| Decision Tree | Non-linear | Interpretable splits; prone to overfitting without depth limit |
-| Random Forest | Ensemble (bagging) | Variance reduction via averaging; 3 params tuned |
+| Decision Tree Regressor | Non-linear | Interpretable axis-aligned splits on MSE; depth + leaf size tuned |
+| Random Forest Regressor | Ensemble (bagging) | Variance reduction via averaging over B trees; 3 params tuned |
 | Gradient Boosting | Ensemble (boosting) | Iterative residual fitting; 3 params tuned |
-| K-Nearest Neighbors | Instance-based | Non-parametric; no training phase; k + weight tuned |
 | XGBoost | Optimised boosting | Regularised gradient boosting; state-of-the-art on tabular data; 4 params tuned |
 | LightGBM | Fast boosting | Histogram-based leaf-wise growth; efficient for larger datasets; 3 params tuned |
 

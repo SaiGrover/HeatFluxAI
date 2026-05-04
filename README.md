@@ -111,14 +111,13 @@ Rows where no 8-day composite falls within ±8 days (extended cloud cover) recei
 
 ---
 
-## Models Trained (8–9)
+## Models Trained (7–8)
 
 | Category | Models |
 |----------|--------|
 | Linear | Linear Regression, Ridge (α tuned), Lasso (α tuned) |
-| Tree | Decision Tree (depth + leaf size tuned), Random Forest (estimators + depth + leaf tuned) |
+| Tree | Decision Tree Regressor (depth + leaf size tuned), Random Forest Regressor (estimators + depth + leaf tuned) |
 | Boosting | Gradient Boosting, XGBoost\*, LightGBM\* — all hyperparameter tuned |
-| Distance | K-Nearest Neighbors (k + weight function tuned) |
 
 \* installed automatically if available
 

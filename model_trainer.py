@@ -16,7 +16,6 @@ import pandas as pd
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.neighbors import KNeighborsRegressor
 from sklearn.model_selection import (
     GroupShuffleSplit, GroupKFold, cross_val_score, GridSearchCV
 )
@@ -61,7 +60,6 @@ def get_base_models() -> dict:
         "Decision Tree":       DecisionTreeRegressor(random_state=RANDOM_STATE),
         "Random Forest":       RandomForestRegressor(random_state=RANDOM_STATE, n_jobs=-1),
         "Gradient Boosting":   GradientBoostingRegressor(random_state=RANDOM_STATE),
-        "K-Nearest Neighbors": KNeighborsRegressor(),
     }
     xgb = _get_xgboost()
     if xgb:
@@ -84,7 +82,6 @@ PARAM_GRIDS = {
                             "min_samples_leaf": [1, 2]},
     "Gradient Boosting":   {"n_estimators": [100, 200], "learning_rate": [0.05, 0.1],
                             "max_depth": [3, 5]},
-    "K-Nearest Neighbors": {"n_neighbors": [3, 5, 7, 11], "weights": ["uniform", "distance"]},
     "XGBoost":             {"n_estimators": [100, 200], "learning_rate": [0.05, 0.1],
                             "max_depth": [4, 6], "subsample": [0.8, 1.0]},
     "LightGBM":            {"n_estimators": [100, 200], "learning_rate": [0.05, 0.1],
