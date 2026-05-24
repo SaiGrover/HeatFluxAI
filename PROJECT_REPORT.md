@@ -6,6 +6,7 @@
 > **Course:** Artificial Intelligence & Machine Learning — Project-Based Learning
 > **Project Title:** Urban Heat Island Intensity Estimation using Satellite Imagery and Reanalysis Weather Data
 > **Dashboard Port:** http://localhost:8505
+> **Author:** Saanvi Grocer
 
 ---
 
@@ -16,9 +17,8 @@
 3. [Module Diagram & Flowcharts](#3-module-diagram--flowcharts)
 4. [Main Modules — Algorithms & Description](#4-main-modules--algorithms--description)
 5. [Relevant AI & ML Topics](#5-relevant-ai--ml-topics)
-6. [Work Division](#6-work-division)
-7. [Conclusion and Discussion](#7-conclusion-and-discussion)
-8. [Appendix I — Implementation Code](#appendix-i--implementation-code)
+6. [Conclusion and Discussion](#7-conclusion-and-discussion)
+7. [Appendix I — Implementation Code](#appendix-i--implementation-code)
 
 ---
 
@@ -765,28 +765,6 @@ NDVI = (NIR − Red) / (NIR + Red)   ∈ [−1, 1]
 Values near 1 indicate dense vegetation; values near 0 indicate bare soil or concrete.
 
 **Urban fraction proxy:** `1 − NDVI` — cities with low NDVI have high urban fraction (impervious surfaces).
-
----
-
-## 6. Work Division
-
-> The following distribution reflects each team member's primary ownership.
-> All members contributed to design decisions, testing, and the final demonstration.
-
-| Member | Primary Responsibilities | Modules |
-|--------|------------------------|---------|
-| **Member 1** | Data pipeline architecture · GEE integration · LST timeseries algorithm · rural offset design | `data_collector.py`, `config.py` |
-| **Member 2** | Feature engineering · IQR outlier capping · UHI target computation · preprocessing pipeline | `preprocessor.py` |
-| **Member 3** | Model selection · GridSearchCV setup · GroupKFold evaluation · metrics framework · baseline comparison | `model_trainer.py` |
-| **Member 4** | Dashboard UI · all 6 tabs · custom CSS · Plotly charts · 3D surface · city similarity · prediction engine | `dashboard.py` |
-| **Member 5** | Project coordination · documentation · report · viva preparation · bug triage across all modules | `README.md`, `PROJECT_DOCUMENTATION.md`, `PROJECT_REPORT.md` |
-
-**Shared responsibilities (all members):**
-- Code review and pair debugging across modules
-- Identifying and eliminating data leakage
-- Selecting the 25 study cities
-- Designing the feature set and reviewing physical interpretability
-- Testing the end-to-end pipeline
 
 ---
 
