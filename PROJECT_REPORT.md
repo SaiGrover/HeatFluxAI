@@ -4,8 +4,11 @@
 ---
 
 > **Course:** Artificial Intelligence & Machine Learning — Project-Based Learning
+
 > **Project Title:** Urban Heat Island Intensity Estimation using Satellite Imagery and Reanalysis Weather Data
+
 > **Dashboard Port:** http://localhost:8505
+
 > **Author:** Saanvi Grocer
 
 ---
