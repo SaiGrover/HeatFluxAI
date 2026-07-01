@@ -101,6 +101,23 @@ def step_dashboard():
 
 
 def running_inside_streamlit() -> bool:
+    streamlit_env_vars = [
+        "STREAMLIT_SERVER_PORT",
+        "STREAMLIT_SERVER_HEADLESS",
+        "STREAMLIT_BROWSER_GATHER_USAGE_STATS",
+        "IS_STREAMLIT_CLOUD",
+    ]
+    if any(os.getenv(name) is not None for name in streamlit_env_vars):
+        return True
+
+    try:
+        from streamlit.runtime import exists
+
+        if exists():
+            return True
+    except Exception:
+        pass
+
     try:
         from streamlit.runtime.scriptrunner import get_script_run_ctx
 
