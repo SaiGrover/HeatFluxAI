@@ -43,6 +43,7 @@ logs/
 # ─── Miscellaneous junk files ────────────────────────────────────────────────
 *.txt
 !requirements*.txt
+!runtime.txt
 
 # ─── OS / editor artefacts ───────────────────────────────────────────────────
 .DS_Store
