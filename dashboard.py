@@ -596,40 +596,66 @@ hr {{ border-color: {COLORS['border']} !important; margin:1.2rem 0 !important; }
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=300)
 def load_raw_data():
-    return pd.read_csv(RAW_DATA_PATH) if RAW_DATA_PATH.exists() else None
+    try:
+        return pd.read_csv(RAW_DATA_PATH) if RAW_DATA_PATH.exists() else None
+    except Exception:
+        return None
 
 @st.cache_data(ttl=300)
 def load_processed_data():
-    return pd.read_csv(PROCESSED_DATA_PATH) if PROCESSED_DATA_PATH.exists() else None
+    try:
+        return pd.read_csv(PROCESSED_DATA_PATH) if PROCESSED_DATA_PATH.exists() else None
+    except Exception:
+        return None
 
 @st.cache_resource
 def load_model():
-    if BEST_MODEL_PATH.exists():
-        with open(BEST_MODEL_PATH, "rb") as f: return pickle.load(f)
+    try:
+        if BEST_MODEL_PATH.exists():
+            with open(BEST_MODEL_PATH, "rb") as f:
+                return pickle.load(f)
+    except Exception:
+        return None
     return None
 
 @st.cache_resource
 def load_scaler():
-    if SCALER_PATH.exists():
-        with open(SCALER_PATH, "rb") as f: return pickle.load(f)
+    try:
+        if SCALER_PATH.exists():
+            with open(SCALER_PATH, "rb") as f:
+                return pickle.load(f)
+    except Exception:
+        return None
     return None
 
 @st.cache_data
 def load_metrics():
-    if METRICS_PATH.exists():
-        with open(METRICS_PATH) as f: return json.load(f)
+    try:
+        if METRICS_PATH.exists():
+            with open(METRICS_PATH) as f:
+                return json.load(f)
+    except Exception:
+        return None
     return None
 
 @st.cache_data
 def load_feature_names():
-    if FEATURES_PATH.exists():
-        with open(FEATURES_PATH) as f: return json.load(f)
+    try:
+        if FEATURES_PATH.exists():
+            with open(FEATURES_PATH) as f:
+                return json.load(f)
+    except Exception:
+        return None
     return None
 
 @st.cache_data(ttl=300)
 def load_outlier_stats():
-    if OUTLIER_STATS_PATH.exists():
-        with open(OUTLIER_STATS_PATH) as f: return json.load(f)
+    try:
+        if OUTLIER_STATS_PATH.exists():
+            with open(OUTLIER_STATS_PATH) as f:
+                return json.load(f)
+    except Exception:
+        return None
     return None
 
 
