@@ -52,7 +52,18 @@ def _get_lightgbm():
 
 # ─── Model registry ───────────────────────────────────────────────────────────
 
-def get_base_models() -> dict:
+def get_base_models(fast: bool = False) -> dict:
+    if fast:
+        return {
+            "Linear Regression": LinearRegression(),
+            "Ridge Regression": Ridge(),
+            "Decision Tree": DecisionTreeRegressor(
+                random_state=RANDOM_STATE,
+                max_depth=5,
+                min_samples_leaf=2,
+            ),
+        }
+
     models = {
         "Linear Regression":   LinearRegression(),
         "Ridge Regression":    Ridge(),
@@ -107,7 +118,7 @@ def get_feature_importance(model, feature_names: list) -> dict:
 
 # ─── Training pipeline ───────────────────────────────────────────────────────
 
-def train(force: bool = False) -> dict:
+def train(force: bool = False, fast: bool = False) -> dict:
     """
     Train all models, evaluate, pick the best, save artefacts.
     Returns the full metrics dict.
@@ -198,11 +209,11 @@ def train(force: bool = False) -> dict:
     best_rmse   = float("inf")
     best_model  = None
 
-    for name, base_model in get_base_models().items():
+    for name, base_model in get_base_models(fast=fast).items():
         log.info(f"  Training: {name} ...")
         try:
             # GridSearchCV with group-aware inner CV
-            if name in PARAM_GRIDS:
+            if name in PARAM_GRIDS and not fast:
                 gs = GridSearchCV(
                     base_model,
                     PARAM_GRIDS[name],

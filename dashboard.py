@@ -944,20 +944,43 @@ with st.sidebar:
 # ── Load everything once ──────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("<hr>", unsafe_allow_html=True)
+    refresh_city_count = st.slider(
+        "Live refresh cities",
+        min_value=3,
+        max_value=len(CITIES),
+        value=min(5, len(CITIES)),
+        help="Use fewer cities on Streamlit Cloud to avoid killing the session.",
+    )
+    run_training = st.checkbox(
+        "Train model after refresh",
+        value=False,
+        help="Uses a lightweight cloud-safe training pass.",
+    )
     if st.button("Refresh live data", use_container_width=True):
         try:
-            with st.spinner("Collecting GEE/Open-Meteo data and retraining models..."):
+            status_box = st.empty()
+            selected_cities = CITIES[:refresh_city_count]
+
+            with st.spinner(f"Collecting live data for {refresh_city_count} cities..."):
                 from data_collector import collect_data
                 from preprocessor import preprocess
-                from model_trainer import train
 
-                collect_data(force=True)
+                status_box.info("Step 1/3: collecting live GEE/Open-Meteo data...")
+                collect_data(force=True, cities=selected_cities)
+                status_box.info("Step 2/3: preprocessing refreshed data...")
                 preprocess(force=True)
-                train(force=True)
+
+                if run_training:
+                    from model_trainer import train
+
+                    status_box.info("Step 3/3: training lightweight cloud model...")
+                    train(force=True, fast=True)
+                else:
+                    status_box.info("Step 3/3: skipped model training.")
+
                 st.cache_data.clear()
                 st.cache_resource.clear()
-            st.success("Live pipeline completed. Reloading dashboard.")
-            st.rerun()
+            st.success("Live refresh completed. Refresh the browser once to reload the latest artifacts.")
         except Exception as exc:
             st.error(f"Live pipeline failed: {exc}")
 

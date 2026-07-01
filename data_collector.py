@@ -377,7 +377,7 @@ def fetch_openweather_current(city: dict) -> dict | None:
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
-def collect_data(force: bool = False) -> pd.DataFrame:
+def collect_data(force: bool = False, cities: list[dict] | None = None) -> pd.DataFrame:
     if RAW_DATA_PATH.exists() and not force:
         log.info(f"Raw data exists. Loading ...")
         return pd.read_csv(RAW_DATA_PATH)
@@ -395,7 +395,9 @@ def collect_data(force: bool = False) -> pd.DataFrame:
 
     rows = []
 
-    for city in CITIES:
+    selected_cities = cities or CITIES
+
+    for city in selected_cities:
 
         # ── 1. NDVI — skip city if all scales fail ────────────────────────
         ndvi = fetch_ndvi(city["lat"], city["lon"])
