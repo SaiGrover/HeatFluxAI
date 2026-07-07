@@ -1809,12 +1809,16 @@ elif nav == "🤖  Models":
                 figPV.add_trace(go.Scatter(x=xr,y=slope*xr+intercept,
                                            mode="lines",name=f"OLS  r={r:.3f}",
                                            line=dict(color=COLORS["accent"],width=2.5)))
+                figPV_layout = {
+                    key: value for key, value in _PL.items()
+                    if key not in ("xaxis", "yaxis")
+                }
                 figPV.update_layout(
                     title=f"Predicted vs Actual UHI — {best}  (all {len(pva_df):,} rows)",
                     xaxis_title="Actual UHI (°C)",yaxis_title="Predicted UHI (°C)",
                     xaxis=dict(**_PL["xaxis"],range=[0,lim]),
                     yaxis=dict(**_PL["yaxis"],range=[0,lim]),
-                    **_PL)
+                    **figPV_layout)
                 st.plotly_chart(figPV, use_container_width=True)
             except Exception as e:
                 st.info(f"Predicted vs Actual not available: {e}")

@@ -128,6 +128,27 @@ PARAM_GRIDS = {
                             "max_depth": [4, 6]},
 }
 
+FAST_PARAM_GRIDS = {
+    "Ridge Regression": {"alpha": [0.1, 1.0, 10.0]},
+    "Decision Tree": {"max_depth": [4, 6, 8], "min_samples_leaf": [1, 2, 5]},
+    "Random Forest": {
+        "n_estimators": [50, 100],
+        "max_depth": [6, 8, None],
+        "min_samples_leaf": [1, 2],
+    },
+    "XGBoost": {
+        "n_estimators": [50, 100],
+        "learning_rate": [0.05, 0.1],
+        "max_depth": [3, 4],
+        "subsample": [0.9, 1.0],
+    },
+    "LightGBM": {
+        "n_estimators": [50, 100],
+        "learning_rate": [0.05, 0.1],
+        "max_depth": [3, 4],
+    },
+}
+
 
 # ─── Feature importance ───────────────────────────────────────────────────────
 
@@ -242,10 +263,11 @@ def train(force: bool = False, fast: bool = False) -> dict:
         log.info(f"  Training: {name} ...")
         try:
             # GridSearchCV with group-aware inner CV
-            if name in PARAM_GRIDS and not fast:
+            param_grid = FAST_PARAM_GRIDS.get(name) if fast else PARAM_GRIDS.get(name)
+            if param_grid:
                 gs = GridSearchCV(
                     base_model,
-                    PARAM_GRIDS[name],
+                    param_grid,
                     cv=inner_cv,
                     scoring="neg_root_mean_squared_error",
                     n_jobs=-1,
