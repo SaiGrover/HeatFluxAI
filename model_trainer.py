@@ -54,7 +54,7 @@ def _get_lightgbm():
 
 def get_base_models(fast: bool = False) -> dict:
     if fast:
-        return {
+        models = {
             "Linear Regression": LinearRegression(),
             "Ridge Regression": Ridge(),
             "Decision Tree": DecisionTreeRegressor(
@@ -62,7 +62,36 @@ def get_base_models(fast: bool = False) -> dict:
                 max_depth=5,
                 min_samples_leaf=2,
             ),
+            "Random Forest": RandomForestRegressor(
+                random_state=RANDOM_STATE,
+                n_estimators=50,
+                max_depth=8,
+                min_samples_leaf=2,
+                n_jobs=-1,
+            ),
         }
+        xgb = _get_xgboost()
+        if xgb:
+            xgb.set_params(
+                n_estimators=50,
+                max_depth=4,
+                learning_rate=0.1,
+                subsample=0.9,
+                n_jobs=1,
+            )
+            models["XGBoost"] = xgb
+            log.info("  XGBoost available")
+        lgbm = _get_lightgbm()
+        if lgbm:
+            lgbm.set_params(
+                n_estimators=50,
+                max_depth=4,
+                learning_rate=0.1,
+                n_jobs=1,
+            )
+            models["LightGBM"] = lgbm
+            log.info("  LightGBM available")
+        return models
 
     models = {
         "Linear Regression":   LinearRegression(),
