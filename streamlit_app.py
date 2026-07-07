@@ -4,8 +4,14 @@ Deploy this file on Streamlit Cloud. The local full pipeline still runs from
 `python main.py`.
 """
 
+import importlib
+import sys
+
 try:
-    import dashboard  # noqa: F401
+    if "dashboard" in sys.modules:
+        importlib.reload(sys.modules["dashboard"])
+    else:
+        import dashboard  # noqa: F401
 except Exception as exc:
     import traceback
 
