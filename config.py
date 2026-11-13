@@ -18,7 +18,9 @@ def _secret(name: str, default: str) -> str:
     try:
         import streamlit as st
 
-        if name in st.secrets:
+        # Only touch st.secrets when a secrets.toml exists; otherwise Streamlit
+        # renders a "No secrets found" error in the page for every lookup.
+        if st.secrets.load_if_toml_exists() and name in st.secrets:
             return str(st.secrets[name])
     except Exception:
         pass
@@ -44,21 +46,24 @@ OPENWEATHER_BASE_URL = "https://api.openweathermap.org/data/2.5"
 CDS_API_URL = "https://cds.climate.copernicus.eu/api"
 CDS_API_KEY = _secret("CDS_API_KEY", "YOUR_CDS_API_KEY")
 
-# Warn (don't crash) if keys look like placeholders — lets the dashboard still open
-_missing = [
-    name for name, val in [
-        ("GEE_PROJECT_ID",      GEE_PROJECT_ID),
-        ("OPENWEATHER_API_KEY", OPENWEATHER_API_KEY),
-        ("CDS_API_KEY",         CDS_API_KEY),
+def warn_missing_keys() -> None:
+    """Warn (don't crash) if collection keys look like placeholders.  Called by
+    the GEE collector only, so dashboard/evaluation imports stay quiet."""
+    missing = [
+        name for name, val in [
+            ("GEE_PROJECT_ID",      GEE_PROJECT_ID),
+            ("OPENWEATHER_API_KEY", OPENWEATHER_API_KEY),
+            ("CDS_API_KEY",         CDS_API_KEY),
+        ]
+        if val.startswith("YOUR_")
     ]
-    if val.startswith("YOUR_")
-]
-if _missing:
-    warnings.warn(
-        f"Missing env vars: {_missing}. "
-        "Add them to the .env file before running data collection.",
-        stacklevel=2,
-    )
+    if missing:
+        warnings.warn(
+            f"Missing env vars: {missing}. "
+            "Add them to the .env file before running data collection.",
+            stacklevel=2,
+        )
+
 
 # ─── Data Collection Settings ─────────────────────────────────────────────────
 CITIES = [
@@ -89,6 +94,11 @@ CITIES = [
     {"name": "Seoul",        "lat": 37.5665, "lon": 126.9780},
 ]
 
+# Fixed collection window (180 days) — fixed dates make collection reproducible.
+COLLECTION_START = "2025-01-01"
+COLLECTION_END   = "2025-06-29"
+NDVI_YEAR        = 2023          # annual-mean NDVI year (as in the GEE collector)
+
 # ─── Preprocessing Settings ───────────────────────────────────────────────────
 FEATURE_COLUMNS = [
     # Core weather
@@ -104,18 +114,34 @@ FEATURE_COLUMNS = [
     "temp_anomaly", "heat_retention",
 ]
 TARGET_COLUMN = "uhi_intensity"
+GROUP_COLUMN  = "city_name"      # real city identifier used for grouped CV
+TARGET_PROVENANCE_COLUMN = "target_provenance"
+OBSERVED_TARGET_PROVENANCE = "observed_modis_lst_difference"
+
+# Features dropped by definition (stateless, documented — not learned from data):
+#   urban_fraction = clip(1 − NDVI) in both collectors, i.e. a deterministic
+#   re-expression of NDVI rather than an independent land-cover measurement.
+DEFINITIONAL_DUPLICATE_FEATURES = {"urban_fraction": "defined as clip(1 - ndvi, 0, 1)"}
 
 # ─── Model Settings ───────────────────────────────────────────────────────────
 RANDOM_STATE = 42
-TEST_SIZE     = 0.2
-CV_FOLDS      = 5          # used with GroupKFold — 5 folds across city groups
+CV_FOLDS      = 5          # inner GroupKFold folds (capped at #training cities)
+BOOTSTRAP_ITERATIONS = 2000
+MIN_CITIES_FOR_NESTED_CV = 4     # 1 outer test city + ≥3 cities for inner grouped CV
+MIN_CITIES_FOR_CI = 8            # below this, city-bootstrap CIs are not reported
 
 # ─── File Paths ───────────────────────────────────────────────────────────────
+EVAL_DIR            = BASE_DIR / "evaluation"
+EVAL_DIR.mkdir(parents=True, exist_ok=True)
 RAW_DATA_PATH       = DATA_DIR / "raw_data.csv"
+# Committed raw snapshot used for the published evaluation (Planetary Computer
+# MODIS + Open-Meteo, fixed window above).
+SNAPSHOT_DATA_PATH  = DATA_DIR / "snapshot_modis_pc_2025H1.csv"
 PROCESSED_DATA_PATH = DATA_DIR / "processed_data.csv"
-BEST_MODEL_PATH     = MODEL_DIR / "best_model.pkl"
-SCALER_PATH         = MODEL_DIR / "scaler.pkl"
-METRICS_PATH        = MODEL_DIR / "metrics.json"
+BEST_MODEL_PATH     = MODEL_DIR / "best_model.pkl"   # full sklearn Pipeline (raw features in)
+SCALER_PATH         = MODEL_DIR / "scaler.pkl"       # legacy; no longer written
+METRICS_PATH        = EVAL_DIR / "metrics.json"      # committed evaluation artifact
+HELDOUT_PREDICTIONS_PATH = EVAL_DIR / "heldout_predictions.csv"
 FEATURES_PATH       = MODEL_DIR / "feature_names.json"
 
 # ─── Dashboard Settings ───────────────────────────────────────────────────────

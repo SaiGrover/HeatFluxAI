@@ -1,0 +1,1658 @@
+{
+  "schema_version": "2.0",
+  "evaluation": {
+    "method": "nested_leave_one_city_out",
+    "version": "2.0.0",
+    "group_column": "city_name",
+    "outer_cv": "LeaveOneGroupOut (one city held out per fold)",
+    "inner_cv": "GroupKFold over outer-training cities, n_splits = min(5, #training cities)",
+    "selection_metric": "rmse",
+    "selection_rule": "GridSearchCV(scoring='neg_root_mean_squared_error'): highest mean inner-fold score (lowest mean inner RMSE) over algorithm × hyper-parameters; ties → first in grid order; refit on all outer-training cities",
+    "test_data_used_for_selection": false,
+    "preprocessing": "fold-local Pipeline: Winsorizer(IQR k=1.5 on weather+ndvi) → SimpleImputer(median) → VarianceThreshold(1e-12) → DuplicateFeatureDropper(exact) → StandardScaler",
+    "random_seed": 42,
+    "fast_grid": false,
+    "code_fingerprint_sha256": "dd4fa47fc1cdbf3ea6a7202b6c68563a19dc99e896cac8d2b5b14dcbf6ba3a78"
+  },
+  "dataset": {
+    "raw_file": "snapshot_modis_pc_2025H1.csv",
+    "raw_file_sha256": "36fec997cb3d8743b41040abf8359bce6133a10df2324777ca8e5a365827b8ca",
+    "eligible_table_fingerprint_sha256": "3a0472768ee1b79ebe1a920b7a8412b6509b14f4b29b3dab979dfbc69e44e49a",
+    "n_rows_total": 4500,
+    "n_cities": 24,
+    "cities": [
+      "Bangkok",
+      "Beijing",
+      "Berlin",
+      "Cairo",
+      "Chicago",
+      "Delhi",
+      "Dhaka",
+      "Istanbul",
+      "Jakarta",
+      "Karachi",
+      "Kolkata",
+      "Lagos",
+      "London",
+      "Los Angeles",
+      "Mexico City",
+      "Mumbai",
+      "Paris",
+      "Seoul",
+      "Shanghai",
+      "Singapore",
+      "Sydney",
+      "São Paulo",
+      "Tokyo",
+      "Toronto"
+    ],
+    "n_evaluated_observations": 3624,
+    "n_excluded_targets": 876,
+    "excluded_target_reasons": {
+      "target_not_observed:missing_lst_no_covering_composite": 876
+    },
+    "n_unique_city_lst_composites": 461,
+    "date_range": [
+      "2025-01-01",
+      "2025-06-29"
+    ],
+    "target_summary": {
+      "mean": 1.963709,
+      "std": 2.968837,
+      "min": -8.32,
+      "max": 13.2,
+      "n_negative": 856,
+      "fraction_negative": 0.236203
+    }
+  },
+  "target_policy": {
+    "definition": "uhi_intensity = urban_LST − median(rural ring LST), °C, MODIS MOD11A2 LST_Day_1km 8-day composite covering the observation date",
+    "eligible_provenance": [
+      "observed_modis_lst_difference"
+    ],
+    "imputed_targets": "none — rows without an observed LST pair are excluded from training, tuning and scoring",
+    "negative_values": "kept (urban surface cooler than rural reference)",
+    "clipping": "none"
+  },
+  "features": {
+    "candidates": [
+      "temperature",
+      "humidity",
+      "wind_speed",
+      "pressure",
+      "clouds",
+      "ndvi",
+      "veg_class",
+      "lat",
+      "lon",
+      "distance_from_equator",
+      "hour",
+      "month",
+      "is_daytime",
+      "is_night",
+      "temp_humidity_interaction",
+      "wind_cooling_effect",
+      "temp_anomaly",
+      "heat_retention",
+      "hour_sin",
+      "hour_cos",
+      "month_sin",
+      "month_cos",
+      "lat_abs",
+      "lon_sin",
+      "lon_cos",
+      "heat_index"
+    ],
+    "definitional_drops": {
+      "urban_fraction": "defined as clip(1 − ndvi, 0, 1); a re-expression of NDVI, dropped before modelling"
+    },
+    "fold_local_selection": "constant (variance ≤ 1e-12) and exact-duplicate columns are detected on each fold's training rows only",
+    "retained_in_all_outer_folds": [
+      "temperature",
+      "humidity",
+      "wind_speed",
+      "pressure",
+      "clouds",
+      "ndvi",
+      "veg_class",
+      "lat",
+      "lon",
+      "distance_from_equator",
+      "month",
+      "temp_humidity_interaction",
+      "wind_cooling_effect",
+      "temp_anomaly",
+      "heat_retention",
+      "month_sin",
+      "month_cos",
+      "lon_sin",
+      "lon_cos",
+      "heat_index"
+    ],
+    "retained_in_some_outer_folds": [],
+    "dropped_in_all_outer_folds": [
+      "hour",
+      "is_daytime",
+      "is_night",
+      "hour_sin",
+      "hour_cos",
+      "lat_abs"
+    ]
+  },
+  "models": {
+    "mean_baseline": {
+      "description": "DummyRegressor(strategy='mean'): predicts the outer-training-fold mean UHI",
+      "n_cities": 24,
+      "n_observations": 3624,
+      "macro_mae": 2.366627,
+      "macro_rmse": 2.842929,
+      "pooled_mae": 2.324115,
+      "pooled_rmse": 3.039055
+    },
+    "latitude_ndvi_baseline": {
+      "description": "LinearRegression on [lat (signed), ndvi] with fold-local median imputation",
+      "features": [
+        "lat",
+        "ndvi"
+      ],
+      "n_cities": 24,
+      "n_observations": 3624,
+      "macro_mae": 2.51274,
+      "macro_rmse": 2.991065,
+      "pooled_mae": 2.451013,
+      "pooled_rmse": 3.164369
+    },
+    "nested_selected_model": {
+      "description": "per outer fold, the algorithm + hyper-parameters chosen by inner grouped CV RMSE, refit on all outer-training cities",
+      "search_space": [
+        {
+          "family": "LinearRegression",
+          "fixed_params": {},
+          "searched": {}
+        },
+        {
+          "family": "Ridge",
+          "fixed_params": {
+            "max_iter": null,
+            "random_state": null
+          },
+          "searched": {
+            "alpha": [
+              0.1,
+              1.0,
+              10.0,
+              100.0
+            ]
+          }
+        },
+        {
+          "family": "Lasso",
+          "fixed_params": {
+            "max_iter": 20000,
+            "random_state": null
+          },
+          "searched": {
+            "alpha": [
+              0.001,
+              0.01,
+              0.1
+            ]
+          }
+        },
+        {
+          "family": "DecisionTreeRegressor",
+          "fixed_params": {
+            "random_state": 42
+          },
+          "searched": {
+            "max_depth": [
+              3,
+              5,
+              8
+            ],
+            "min_samples_leaf": [
+              5,
+              20
+            ]
+          }
+        },
+        {
+          "family": "RandomForestRegressor",
+          "fixed_params": {
+            "n_estimators": 200,
+            "random_state": 42
+          },
+          "searched": {
+            "max_depth": [
+              5,
+              10,
+              null
+            ],
+            "min_samples_leaf": [
+              2,
+              10
+            ]
+          }
+        },
+        {
+          "family": "GradientBoostingRegressor",
+          "fixed_params": {
+            "random_state": 42
+          },
+          "searched": {
+            "n_estimators": [
+              100,
+              200
+            ],
+            "learning_rate": [
+              0.05,
+              0.1
+            ],
+            "max_depth": [
+              3
+            ]
+          }
+        },
+        {
+          "family": "XGBRegressor",
+          "fixed_params": {
+            "random_state": 42
+          },
+          "searched": {
+            "n_estimators": [
+              200
+            ],
+            "learning_rate": [
+              0.05,
+              0.1
+            ],
+            "max_depth": [
+              3,
+              5
+            ],
+            "subsample": [
+              0.8
+            ]
+          }
+        },
+        {
+          "family": "LGBMRegressor",
+          "fixed_params": {
+            "random_state": 42
+          },
+          "searched": {
+            "n_estimators": [
+              200
+            ],
+            "learning_rate": [
+              0.05,
+              0.1
+            ],
+            "max_depth": [
+              3,
+              5
+            ],
+            "num_leaves": [
+              15
+            ]
+          }
+        }
+      ],
+      "family_selection_counts": {
+        "Lasso": 22,
+        "XGBRegressor": 2
+      },
+      "n_cities": 24,
+      "n_observations": 3624,
+      "macro_mae": 2.651266,
+      "macro_rmse": 3.130344,
+      "pooled_mae": 2.620175,
+      "pooled_rmse": 3.307645
+    }
+  },
+  "per_city": [
+    {
+      "city": "Bangkok",
+      "outer_fold": 0,
+      "n_evaluated": 120,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.106836,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.585078,
+          "rmse": 2.030116,
+          "bias_mean_residual": 1.240018
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 1.683305,
+          "rmse": 2.134054,
+          "bias_mean_residual": 1.403731
+        },
+        "nested_selected_model": {
+          "mae": 2.613891,
+          "rmse": 3.050129,
+          "bias_mean_residual": 2.605381
+        }
+      }
+    },
+    {
+      "city": "Beijing",
+      "outer_fold": 1,
+      "n_evaluated": 176,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.115272,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.983133,
+          "rmse": 2.327711,
+          "bias_mean_residual": -0.590094
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 2.026123,
+          "rmse": 2.360453,
+          "bias_mean_residual": -0.708315
+        },
+        "nested_selected_model": {
+          "mae": 1.703616,
+          "rmse": 2.182291,
+          "bias_mean_residual": -0.958294
+        }
+      }
+    },
+    {
+      "city": "Berlin",
+      "outer_fold": 2,
+      "n_evaluated": 172,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.053596,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.878533,
+          "rmse": 2.478348,
+          "bias_mean_residual": 0.911653
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 1.86799,
+          "rmse": 2.455264,
+          "bias_mean_residual": 0.846888
+        },
+        "nested_selected_model": {
+          "mae": 1.730807,
+          "rmse": 2.325331,
+          "bias_mean_residual": 0.972945
+        }
+      }
+    },
+    {
+      "city": "Cairo",
+      "outer_fold": 3,
+      "n_evaluated": 180,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.013459,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 4.428325,
+          "rmse": 4.688617,
+          "bias_mean_residual": -4.428325
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 4.406802,
+          "rmse": 4.668294,
+          "bias_mean_residual": -4.406802
+        },
+        "nested_selected_model": {
+          "mae": 3.701092,
+          "rmse": 3.942125,
+          "bias_mean_residual": -3.701092
+        }
+      }
+    },
+    {
+      "city": "Chicago",
+      "outer_fold": 4,
+      "n_evaluated": 172,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.018284,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 2.388247,
+          "rmse": 2.90817,
+          "bias_mean_residual": -0.44067
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 2.385426,
+          "rmse": 2.892273,
+          "bias_mean_residual": -0.319343
+        },
+        "nested_selected_model": {
+          "mae": 2.394085,
+          "rmse": 2.867885,
+          "bias_mean_residual": -1.286898
+        }
+      }
+    },
+    {
+      "city": "Delhi",
+      "outer_fold": 5,
+      "n_evaluated": 160,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.24749,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 2.546676,
+          "rmse": 3.265885,
+          "bias_mean_residual": -2.525719
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 2.958272,
+          "rmse": 3.610833,
+          "bias_mean_residual": -2.958272
+        },
+        "nested_selected_model": {
+          "mae": 2.023454,
+          "rmse": 2.659773,
+          "bias_mean_residual": -1.70876
+        }
+      }
+    },
+    {
+      "city": "Dhaka",
+      "outer_fold": 6,
+      "n_evaluated": 136,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.076411,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.07043,
+          "rmse": 1.341346,
+          "bias_mean_residual": 0.892735
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 0.93165,
+          "rmse": 1.201353,
+          "bias_mean_residual": 0.664091
+        },
+        "nested_selected_model": {
+          "mae": 1.772867,
+          "rmse": 2.075003,
+          "bias_mean_residual": 1.694131
+        }
+      }
+    },
+    {
+      "city": "Istanbul",
+      "outer_fold": 7,
+      "n_evaluated": 132,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.191154,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.566194,
+          "rmse": 1.847246,
+          "bias_mean_residual": 0.44901
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 1.519817,
+          "rmse": 1.822212,
+          "bias_mean_residual": 0.331285
+        },
+        "nested_selected_model": {
+          "mae": 1.535215,
+          "rmse": 1.919,
+          "bias_mean_residual": 0.450124
+        }
+      }
+    },
+    {
+      "city": "Jakarta",
+      "outer_fold": 8,
+      "n_evaluated": 20,
+      "selected_family": "XGBRegressor",
+      "selected_params": {
+        "learning_rate": 0.05,
+        "max_depth": 3,
+        "n_estimators": 200,
+        "subsample": 0.8
+      },
+      "inner_cv_rmse": 2.9571,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 4.935529,
+          "rmse": 4.960079,
+          "bias_mean_residual": 4.935529
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 5.103597,
+          "rmse": 5.127342,
+          "bias_mean_residual": 5.103597
+        },
+        "nested_selected_model": {
+          "mae": 4.107518,
+          "rmse": 4.14055,
+          "bias_mean_residual": 4.107518
+        }
+      }
+    },
+    {
+      "city": "Karachi",
+      "outer_fold": 9,
+      "n_evaluated": 180,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 2.853609,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 5.374194,
+          "rmse": 5.605266,
+          "bias_mean_residual": -5.374194
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 5.593248,
+          "rmse": 5.815623,
+          "bias_mean_residual": -5.593248
+        },
+        "nested_selected_model": {
+          "mae": 4.889141,
+          "rmse": 5.215622,
+          "bias_mean_residual": -4.889141
+        }
+      }
+    },
+    {
+      "city": "Kolkata",
+      "outer_fold": 10,
+      "n_evaluated": 152,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.107794,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 2.165431,
+          "rmse": 2.36976,
+          "bias_mean_residual": 1.94415
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 2.147888,
+          "rmse": 2.353701,
+          "bias_mean_residual": 1.924543
+        },
+        "nested_selected_model": {
+          "mae": 3.012862,
+          "rmse": 3.268008,
+          "bias_mean_residual": 2.837954
+        }
+      }
+    },
+    {
+      "city": "Lagos",
+      "outer_fold": 11,
+      "n_evaluated": 64,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.059886,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 2.26625,
+          "rmse": 2.906135,
+          "bias_mean_residual": 0.911132
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 2.324647,
+          "rmse": 2.998305,
+          "bias_mean_residual": 1.172337
+        },
+        "nested_selected_model": {
+          "mae": 2.750868,
+          "rmse": 3.669515,
+          "bias_mean_residual": 2.469427
+        }
+      }
+    },
+    {
+      "city": "London",
+      "outer_fold": 12,
+      "n_evaluated": 180,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.01
+      },
+      "inner_cv_rmse": 3.140368,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.960368,
+          "rmse": 2.932135,
+          "bias_mean_residual": -1.200211
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 2.053486,
+          "rmse": 3.072666,
+          "bias_mean_residual": -1.511411
+        },
+        "nested_selected_model": {
+          "mae": 4.20452,
+          "rmse": 5.053651,
+          "bias_mean_residual": -4.174605
+        }
+      }
+    },
+    {
+      "city": "Los Angeles",
+      "outer_fold": 13,
+      "n_evaluated": 180,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.041278,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.707449,
+          "rmse": 2.525408,
+          "bias_mean_residual": -0.310462
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 1.666606,
+          "rmse": 2.509357,
+          "bias_mean_residual": -0.124783
+        },
+        "nested_selected_model": {
+          "mae": 2.681202,
+          "rmse": 3.235913,
+          "bias_mean_residual": -1.828302
+        }
+      }
+    },
+    {
+      "city": "Mexico City",
+      "outer_fold": 14,
+      "n_evaluated": 172,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.04579,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.362068,
+          "rmse": 1.988403,
+          "bias_mean_residual": 0.727323
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 1.605732,
+          "rmse": 2.240544,
+          "bias_mean_residual": 1.263047
+        },
+        "nested_selected_model": {
+          "mae": 1.284247,
+          "rmse": 1.775134,
+          "bias_mean_residual": 0.619807
+        }
+      }
+    },
+    {
+      "city": "Mumbai",
+      "outer_fold": 15,
+      "n_evaluated": 144,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.115545,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.851499,
+          "rmse": 2.224386,
+          "bias_mean_residual": -0.322061
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 1.857903,
+          "rmse": 2.216775,
+          "bias_mean_residual": -0.264427
+        },
+        "nested_selected_model": {
+          "mae": 2.238921,
+          "rmse": 2.605088,
+          "bias_mean_residual": 1.315925
+        }
+      }
+    },
+    {
+      "city": "Paris",
+      "outer_fold": 16,
+      "n_evaluated": 164,
+      "selected_family": "XGBRegressor",
+      "selected_params": {
+        "learning_rate": 0.1,
+        "max_depth": 5,
+        "n_estimators": 200,
+        "subsample": 0.8
+      },
+      "inner_cv_rmse": 3.06555,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 2.459983,
+          "rmse": 3.199158,
+          "bias_mean_residual": 2.224265
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 2.810329,
+          "rmse": 3.515741,
+          "bias_mean_residual": 2.659545
+        },
+        "nested_selected_model": {
+          "mae": 5.159183,
+          "rmse": 5.596581,
+          "bias_mean_residual": 5.159183
+        }
+      }
+    },
+    {
+      "city": "Seoul",
+      "outer_fold": 17,
+      "n_evaluated": 176,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.100661,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.755678,
+          "rmse": 2.271696,
+          "bias_mean_residual": 0.127005
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 1.743558,
+          "rmse": 2.268151,
+          "bias_mean_residual": -0.006319
+        },
+        "nested_selected_model": {
+          "mae": 1.9466,
+          "rmse": 2.73594,
+          "bias_mean_residual": -1.049302
+        }
+      }
+    },
+    {
+      "city": "Shanghai",
+      "outer_fold": 18,
+      "n_evaluated": 172,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.017493,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.471721,
+          "rmse": 1.86389,
+          "bias_mean_residual": -0.441647
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 1.478427,
+          "rmse": 1.887229,
+          "bias_mean_residual": -0.5316
+        },
+        "nested_selected_model": {
+          "mae": 1.847825,
+          "rmse": 2.331736,
+          "bias_mean_residual": -1.608933
+        }
+      }
+    },
+    {
+      "city": "Singapore",
+      "outer_fold": 19,
+      "n_evaluated": 108,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.154097,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.264428,
+          "rmse": 1.551795,
+          "bias_mean_residual": -0.832213
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 2.874494,
+          "rmse": 3.15883,
+          "bias_mean_residual": -2.874494
+        },
+        "nested_selected_model": {
+          "mae": 2.412006,
+          "rmse": 2.718969,
+          "bias_mean_residual": -2.406197
+        }
+      }
+    },
+    {
+      "city": "Sydney",
+      "outer_fold": 20,
+      "n_evaluated": 172,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.032807,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.764353,
+          "rmse": 2.142368,
+          "bias_mean_residual": 1.113805
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 1.979959,
+          "rmse": 2.335132,
+          "bias_mean_residual": 1.450401
+        },
+        "nested_selected_model": {
+          "mae": 1.352577,
+          "rmse": 1.900465,
+          "bias_mean_residual": -0.200208
+        }
+      }
+    },
+    {
+      "city": "São Paulo",
+      "outer_fold": 21,
+      "n_evaluated": 164,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.289281,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 1.775029,
+          "rmse": 2.084519,
+          "bias_mean_residual": 0.166254
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 1.773557,
+          "rmse": 2.131342,
+          "bias_mean_residual": 0.474381
+        },
+        "nested_selected_model": {
+          "mae": 1.806881,
+          "rmse": 2.090649,
+          "bias_mean_residual": -0.07893
+        }
+      }
+    },
+    {
+      "city": "Tokyo",
+      "outer_fold": 22,
+      "n_evaluated": 172,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 2.937462,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 4.08317,
+          "rmse": 5.193183,
+          "bias_mean_residual": 4.024998
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 4.064678,
+          "rmse": 5.175594,
+          "bias_mean_residual": 4.002278
+        },
+        "nested_selected_model": {
+          "mae": 3.498174,
+          "rmse": 4.392259,
+          "bias_mean_residual": 3.403415
+        }
+      }
+    },
+    {
+      "city": "Toronto",
+      "outer_fold": 23,
+      "n_evaluated": 156,
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.12204,
+      "metrics": {
+        "mean_baseline": {
+          "mae": 3.155285,
+          "rmse": 3.52467,
+          "bias_mean_residual": 2.908411
+        },
+        "latitude_ndvi_baseline": {
+          "mae": 3.448276,
+          "rmse": 3.834482,
+          "bias_mean_residual": 3.277012
+        },
+        "nested_selected_model": {
+          "mae": 2.962829,
+          "rmse": 3.376643,
+          "bias_mean_residual": 2.743235
+        }
+      }
+    }
+  ],
+  "aggregate": {
+    "definitions": {
+      "macro": "unweighted mean of per-city metric (each held-out city counts once)",
+      "pooled": "metric over all held-out observations (cities weighted by #obs)"
+    },
+    "mean_baseline": {
+      "macro_mae": 2.366627,
+      "macro_rmse": 2.842929,
+      "pooled_mae": 2.324115,
+      "pooled_rmse": 3.039055
+    },
+    "latitude_ndvi_baseline": {
+      "macro_mae": 2.51274,
+      "macro_rmse": 2.991065,
+      "pooled_mae": 2.451013,
+      "pooled_rmse": 3.164369
+    },
+    "nested_selected_model": {
+      "macro_mae": 2.651266,
+      "macro_rmse": 3.130344,
+      "pooled_mae": 2.620175,
+      "pooled_rmse": 3.307645
+    },
+    "confidence_intervals": {
+      "status": "ok",
+      "method": "percentile city-level bootstrap: resample cities with replacement, each sampled city keeps all its held-out observations; macro and pooled metrics recomputed per resample; same draws for all models (paired differences)",
+      "unit_of_resampling": "city",
+      "n_bootstrap": 2000,
+      "seed": 42,
+      "level": 0.95,
+      "intervals": {
+        "mean_baseline": {
+          "macro_mae": [
+            1.967611,
+            2.861274
+          ],
+          "macro_rmse": [
+            2.440919,
+            3.339803
+          ],
+          "pooled_mae": [
+            1.913868,
+            2.829509
+          ],
+          "pooled_rmse": [
+            2.502481,
+            3.60543
+          ]
+        },
+        "latitude_ndvi_baseline": {
+          "macro_mae": [
+            2.092273,
+            3.018172
+          ],
+          "macro_rmse": [
+            2.579364,
+            3.489487
+          ],
+          "pooled_mae": [
+            2.020727,
+            2.953797
+          ],
+          "pooled_rmse": [
+            2.627285,
+            3.717608
+          ]
+        },
+        "nested_selected_model": {
+          "macro_mae": [
+            2.256383,
+            3.099204
+          ],
+          "macro_rmse": [
+            2.732279,
+            3.587847
+          ],
+          "pooled_mae": [
+            2.197371,
+            3.100402
+          ],
+          "pooled_rmse": [
+            2.806558,
+            3.810102
+          ]
+        }
+      },
+      "paired_differences": {
+        "nested_selected_model - mean_baseline": {
+          "macro_mae": [
+            -0.034507,
+            0.664469
+          ],
+          "macro_rmse": [
+            -0.019345,
+            0.646241
+          ],
+          "pooled_mae": [
+            -0.035034,
+            0.715207
+          ],
+          "pooled_rmse": [
+            -0.118271,
+            0.751764
+          ]
+        },
+        "nested_selected_model - latitude_ndvi_baseline": {
+          "macro_mae": [
+            -0.17138,
+            0.503734
+          ],
+          "macro_rmse": [
+            -0.159935,
+            0.489077
+          ],
+          "pooled_mae": [
+            -0.156475,
+            0.569842
+          ],
+          "pooled_rmse": [
+            -0.228499,
+            0.601034
+          ]
+        }
+      },
+      "interpretation": "Descriptive uncertainty over cities; not a significance test."
+    }
+  },
+  "outer_folds": [
+    {
+      "outer_fold": 0,
+      "held_out_city": "Bangkok",
+      "n_train": 3504,
+      "n_train_cities": 23,
+      "n_test": 120,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.106836,
+      "train_target_mean": 1.922648,
+      "lat_ndvi_coefficients": {
+        "lat": 0.004024,
+        "ndvi": 2.87159
+      }
+    },
+    {
+      "outer_fold": 1,
+      "held_out_city": "Beijing",
+      "n_train": 3448,
+      "n_train_cities": 23,
+      "n_test": 176,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.115272,
+      "train_target_mean": 1.992367,
+      "lat_ndvi_coefficients": {
+        "lat": 0.003531,
+        "ndvi": 2.742538
+      }
+    },
+    {
+      "outer_fold": 2,
+      "held_out_city": "Berlin",
+      "n_train": 3452,
+      "n_train_cities": 23,
+      "n_test": 172,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.053596,
+      "train_target_mean": 1.92044,
+      "lat_ndvi_coefficients": {
+        "lat": -0.000358,
+        "ndvi": 2.247685
+      }
+    },
+    {
+      "outer_fold": 3,
+      "held_out_city": "Cairo",
+      "n_train": 3444,
+      "n_train_cities": 23,
+      "n_test": 180,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.013459,
+      "train_target_mean": 2.183659,
+      "lat_ndvi_coefficients": {
+        "lat": 0.00054,
+        "ndvi": 0.231524
+      }
+    },
+    {
+      "outer_fold": 4,
+      "held_out_city": "Chicago",
+      "n_train": 3452,
+      "n_train_cities": 23,
+      "n_test": 172,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.018284,
+      "train_target_mean": 1.984623,
+      "lat_ndvi_coefficients": {
+        "lat": 0.002702,
+        "ndvi": 2.49739
+      }
+    },
+    {
+      "outer_fold": 5,
+      "held_out_city": "Delhi",
+      "n_train": 3464,
+      "n_train_cities": 23,
+      "n_test": 160,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.24749,
+      "train_target_mean": 2.075219,
+      "lat_ndvi_coefficients": {
+        "lat": 0.005063,
+        "ndvi": 4.11127
+      }
+    },
+    {
+      "outer_fold": 6,
+      "held_out_city": "Dhaka",
+      "n_train": 3488,
+      "n_train_cities": 23,
+      "n_test": 136,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.076411,
+      "train_target_mean": 1.930206,
+      "lat_ndvi_coefficients": {
+        "lat": 0.002073,
+        "ndvi": 2.294999
+      }
+    },
+    {
+      "outer_fold": 7,
+      "held_out_city": "Istanbul",
+      "n_train": 3492,
+      "n_train_cities": 23,
+      "n_test": 132,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.191154,
+      "train_target_mean": 1.947354,
+      "lat_ndvi_coefficients": {
+        "lat": 0.001834,
+        "ndvi": 2.491653
+      }
+    },
+    {
+      "outer_fold": 8,
+      "held_out_city": "Jakarta",
+      "n_train": 3604,
+      "n_train_cities": 23,
+      "n_test": 20,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "XGBRegressor",
+      "selected_params": {
+        "learning_rate": 0.05,
+        "max_depth": 3,
+        "n_estimators": 200,
+        "subsample": 0.8
+      },
+      "inner_cv_rmse": 2.9571,
+      "train_target_mean": 1.936471,
+      "lat_ndvi_coefficients": {
+        "lat": 0.004538,
+        "ndvi": 2.746432
+      }
+    },
+    {
+      "outer_fold": 9,
+      "held_out_city": "Karachi",
+      "n_train": 3444,
+      "n_train_cities": 23,
+      "n_test": 180,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 2.853609,
+      "train_target_mean": 2.230639,
+      "lat_ndvi_coefficients": {
+        "lat": -0.00471,
+        "ndvi": -1.590586
+      }
+    },
+    {
+      "outer_fold": 10,
+      "held_out_city": "Kolkata",
+      "n_train": 3472,
+      "n_train_cities": 23,
+      "n_test": 152,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.107794,
+      "train_target_mean": 1.882166,
+      "lat_ndvi_coefficients": {
+        "lat": 0.002932,
+        "ndvi": 2.509496
+      }
+    },
+    {
+      "outer_fold": 11,
+      "held_out_city": "Lagos",
+      "n_train": 3560,
+      "n_train_cities": 23,
+      "n_test": 64,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.059886,
+      "train_target_mean": 1.947618,
+      "lat_ndvi_coefficients": {
+        "lat": 0.003532,
+        "ndvi": 2.800029
+      }
+    },
+    {
+      "outer_fold": 12,
+      "held_out_city": "London",
+      "n_train": 3444,
+      "n_train_cities": 23,
+      "n_test": 180,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.01
+      },
+      "inner_cv_rmse": 3.140368,
+      "train_target_mean": 2.023322,
+      "lat_ndvi_coefficients": {
+        "lat": 0.00719,
+        "ndvi": 3.202964
+      }
+    },
+    {
+      "outer_fold": 13,
+      "held_out_city": "Los Angeles",
+      "n_train": 3444,
+      "n_train_cities": 23,
+      "n_test": 180,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.041278,
+      "train_target_mean": 1.979129,
+      "lat_ndvi_coefficients": {
+        "lat": 0.002344,
+        "ndvi": 2.52194
+      }
+    },
+    {
+      "outer_fold": 14,
+      "held_out_city": "Mexico City",
+      "n_train": 3452,
+      "n_train_cities": 23,
+      "n_test": 172,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.04579,
+      "train_target_mean": 1.929189,
+      "lat_ndvi_coefficients": {
+        "lat": 0.004679,
+        "ndvi": 3.576121
+      }
+    },
+    {
+      "outer_fold": 15,
+      "held_out_city": "Mumbai",
+      "n_train": 3480,
+      "n_train_cities": 23,
+      "n_test": 144,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.115545,
+      "train_target_mean": 1.976506,
+      "lat_ndvi_coefficients": {
+        "lat": 0.002099,
+        "ndvi": 2.537516
+      }
+    },
+    {
+      "outer_fold": 16,
+      "held_out_city": "Paris",
+      "n_train": 3460,
+      "n_train_cities": 23,
+      "n_test": 164,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "XGBRegressor",
+      "selected_params": {
+        "learning_rate": 0.1,
+        "max_depth": 5,
+        "n_estimators": 200,
+        "subsample": 0.8
+      },
+      "inner_cv_rmse": 3.06555,
+      "train_target_mean": 1.863052,
+      "lat_ndvi_coefficients": {
+        "lat": -0.001914,
+        "ndvi": 3.586519
+      }
+    },
+    {
+      "outer_fold": 17,
+      "held_out_city": "Seoul",
+      "n_train": 3448,
+      "n_train_cities": 23,
+      "n_test": 176,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.100661,
+      "train_target_mean": 1.957541,
+      "lat_ndvi_coefficients": {
+        "lat": 0.002325,
+        "ndvi": 2.571917
+      }
+    },
+    {
+      "outer_fold": 18,
+      "held_out_city": "Shanghai",
+      "n_train": 3452,
+      "n_train_cities": 23,
+      "n_test": 172,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.017493,
+      "train_target_mean": 1.98467,
+      "lat_ndvi_coefficients": {
+        "lat": 0.002704,
+        "ndvi": 2.670226
+      }
+    },
+    {
+      "outer_fold": 19,
+      "held_out_city": "Singapore",
+      "n_train": 3516,
+      "n_train_cities": 23,
+      "n_test": 108,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.154097,
+      "train_target_mean": 1.98851,
+      "lat_ndvi_coefficients": {
+        "lat": 0.00226,
+        "ndvi": 5.754455
+      }
+    },
+    {
+      "outer_fold": 20,
+      "held_out_city": "Sydney",
+      "n_train": 3452,
+      "n_train_cities": 23,
+      "n_test": 172,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.032807,
+      "train_target_mean": 1.910846,
+      "lat_ndvi_coefficients": {
+        "lat": 0.010431,
+        "ndvi": 2.043782
+      }
+    },
+    {
+      "outer_fold": 21,
+      "held_out_city": "São Paulo",
+      "n_train": 3460,
+      "n_train_cities": 23,
+      "n_test": 164,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.289281,
+      "train_target_mean": 1.956185,
+      "lat_ndvi_coefficients": {
+        "lat": 0.004928,
+        "ndvi": 2.79237
+      }
+    },
+    {
+      "outer_fold": 22,
+      "held_out_city": "Tokyo",
+      "n_train": 3452,
+      "n_train_cities": 23,
+      "n_test": 172,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 2.937462,
+      "train_target_mean": 1.772677,
+      "lat_ndvi_coefficients": {
+        "lat": -0.002579,
+        "ndvi": 1.695779
+      }
+    },
+    {
+      "outer_fold": 23,
+      "held_out_city": "Toronto",
+      "n_train": 3468,
+      "n_train_cities": 23,
+      "n_test": 156,
+      "inner_cv": "GroupKFold(n_splits=5)",
+      "selected_family": "Lasso",
+      "selected_params": {
+        "alpha": 0.1
+      },
+      "inner_cv_rmse": 3.12204,
+      "train_target_mean": 1.838512,
+      "lat_ndvi_coefficients": {
+        "lat": -0.00122,
+        "ndvi": 3.663336
+      }
+    }
+  ],
+  "software": {
+    "python": "3.13.11",
+    "platform": "Windows-11-10.0.26300-SP0",
+    "numpy": "2.5.4",
+    "pandas": "2.3.3",
+    "scikit-learn": "1.9.1",
+    "xgboost": "3.4.1",
+    "lightgbm": "4.7.0",
+    "scipy": "1.18.1"
+  },
+  "limitations": [
+    "25 cities is a small number of independent geographic units; city-bootstrap intervals are wide and assume the cities are exchangeable draws from a wider population of cities, which a hand-picked list of megacities is not.",
+    "One 180-day window (2025-01-01 to 2025-06-29): results may not transfer to other seasons, years, or to the opposite hemisphere's summer.",
+    "The target is a MODIS daytime land-SURFACE temperature difference (urban pixel vs median of 12 rural ring points at 55–110 km), not an air-temperature UHI. Ring points can include water, mountains or other urban areas.",
+    "Each 8-day LST composite is shared by up to 8 consecutive daily weather rows, so observations within a city are strongly autocorrelated; the effective sample size is the number of (city, composite) pairs, not the number of rows.",
+    "Static city attributes (lat, lon, NDVI, veg class) are constant within a city, so they only identify cities; cross-city generalisation from 24 training cities is inherently limited.",
+    "temp_anomaly is computed from each city's own weather over the window (no target information, no cross-city information), which is transductive for the held-out city.",
+    "Leave-one-city-out does not remove spatial dependence between nearby or climatically similar cities (e.g. Delhi/Karachi, Kolkata/Dhaka) or the shared time window.",
+    "The published snapshot uses the Planetary Computer MODIS mirror (MOD13A1 500 m NDVI instead of MOD13A2 1 km); the GEE collector produces a different dataset and must be re-evaluated before its numbers are quoted."
+  ],
+  "deployment_model": {
+    "selection_procedure": "GridSearchCV over the same candidate grid, GroupKFold(n_splits=5) on all eligible cities, selection metric = mean inner-fold RMSE; refit on all eligible rows",
+    "selected_family": "Lasso",
+    "selected_params": {
+      "alpha": 0.1
+    },
+    "selection_cv_rmse": 3.020351,
+    "selection_cv_rmse_note": "Validation score of the winning configuration during selection. It is optimistically biased by the selection and is NOT a held-out test estimate; use the nested leave-one-city-out results for generalisation.",
+    "n_train_observations": 3624,
+    "n_train_cities": 24,
+    "input_features": [
+      "temperature",
+      "humidity",
+      "wind_speed",
+      "pressure",
+      "clouds",
+      "ndvi",
+      "veg_class",
+      "lat",
+      "lon",
+      "distance_from_equator",
+      "hour",
+      "month",
+      "is_daytime",
+      "is_night",
+      "temp_humidity_interaction",
+      "wind_cooling_effect",
+      "temp_anomaly",
+      "heat_retention",
+      "hour_sin",
+      "hour_cos",
+      "month_sin",
+      "month_cos",
+      "lat_abs",
+      "lon_sin",
+      "lon_cos",
+      "heat_index"
+    ],
+    "retained_features": [
+      "temperature",
+      "humidity",
+      "wind_speed",
+      "pressure",
+      "clouds",
+      "ndvi",
+      "veg_class",
+      "lat",
+      "lon",
+      "distance_from_equator",
+      "month",
+      "temp_humidity_interaction",
+      "wind_cooling_effect",
+      "temp_anomaly",
+      "heat_retention",
+      "month_sin",
+      "month_cos",
+      "lon_sin",
+      "lon_cos",
+      "heat_index"
+    ],
+    "feature_importance": {
+      "temperature": 0.0,
+      "humidity": 0.093082,
+      "wind_speed": 0.0,
+      "pressure": 0.01857,
+      "clouds": 0.090046,
+      "ndvi": 0.0,
+      "veg_class": 0.060032,
+      "lat": 0.0,
+      "lon": 0.0,
+      "distance_from_equator": 0.0,
+      "month": 0.0,
+      "temp_humidity_interaction": 0.0,
+      "wind_cooling_effect": 0.257623,
+      "temp_anomaly": 0.276245,
+      "heat_retention": 0.0,
+      "month_sin": 0.0,
+      "month_cos": 0.0,
+      "lon_sin": 0.042123,
+      "lon_cos": 0.162279,
+      "heat_index": 0.0
+    }
+  },
+  "artifacts": {
+    "heldout_predictions": "heldout_predictions.csv",
+    "heldout_predictions_sha256": "a40070fa09ead6d366863d6f210e3c5ca2177bae834a552555e815b86cd70c24",
+    "heldout_predictions_columns": [
+      "observation_id",
+      "city",
+      "date",
+      "outer_fold",
+      "model_name",
+      "estimator",
+      "observed_uhi",
+      "predicted_uhi",
+      "target_provenance",
+      "lst_date",
+      "residual",
+      "absolute_error",
+      "squared_error"
+    ]
+  }
+}

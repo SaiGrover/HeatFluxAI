@@ -29,6 +29,11 @@ models/scaler.pkl
 models/metrics.json
 models/feature_names.json
 models/outlier_stats.json
+# evaluation/metrics.json, evaluation/heldout_predictions.csv and
+# data/snapshot_modis_pc_2025H1.csv ARE committed (reproducible evaluation).
+
+# ─── pytest ──────────────────────────────────────────────────────────────────
+.pytest_cache/
 
 # ─── API cache (auto-regenerated) ────────────────────────────────────────────
 cache/

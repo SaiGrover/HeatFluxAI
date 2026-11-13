@@ -1,0 +1,7 @@
+-r requirements.txt
+# tests
+pytest>=8.0
+# optional: data_collector_pc.py (MODIS via Microsoft Planetary Computer, no GEE account)
+pystac-client>=0.7
+planetary-computer>=1.0
+rasterio>=1.3

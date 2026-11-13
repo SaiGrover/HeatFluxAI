@@ -1,296 +1,280 @@
 """
 UHI Prediction System - Data Preprocessing
-Cleans raw data, engineers features, and prepares the ML-ready dataset.
+
+Turns raw collected rows into the modelling table.  Only *stateless*,
+row-wise or definitional operations happen here; every data-dependent step
+(imputation, outlier capping, scaling, constant/duplicate-feature removal) is
+learned inside each cross-validation fold by the pipeline in ``evaluation.py``.
+
+What this module does NOT do any more (and why):
+  * no global median imputation of features      → fold-local SimpleImputer
+  * no global IQR winsorisation                   → fold-local Winsorizer
+  * no global StandardScaler / scaler.pkl          → fold-local StandardScaler
+  * no imputation of the UHI target                → rows without an observed
+    LST pair keep target = NaN and provenance "missing_lst"
+  * no clipping of the UHI target at 0             → negative UHI (urban
+    surface cooler than its rural reference) is a valid observation
 """
 
+from __future__ import annotations
+
 import json
-import pickle
+import re
+import unicodedata
+
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
 
 from config import (
-    FEATURE_COLUMNS, TARGET_COLUMN,
-    RAW_DATA_PATH, PROCESSED_DATA_PATH,
-    SCALER_PATH, FEATURES_PATH,
-    MODEL_DIR,
+    FEATURE_COLUMNS, TARGET_COLUMN, GROUP_COLUMN,
+    TARGET_PROVENANCE_COLUMN, OBSERVED_TARGET_PROVENANCE,
+    DEFINITIONAL_DUPLICATE_FEATURES,
+    RAW_DATA_PATH, PROCESSED_DATA_PATH, FEATURES_PATH, MODEL_DIR,
 )
 from logger import get_logger
 
 log = get_logger("preprocessor")
 
-# Columns eligible for IQR outlier capping (weather / satellite)
-# Excludes LST, lat/lon, binary/categorical, and the target itself
+# Columns described by the (descriptive-only) IQR outlier report
 _OUTLIER_CAP_COLS = ["temperature", "humidity", "wind_speed", "pressure", "clouds", "ndvi"]
 OUTLIER_STATS_PATH = MODEL_DIR / "outlier_stats.json"
 
+EXTRA_FEATURES = [
+    "hour_sin", "hour_cos", "month_sin", "month_cos",
+    "lat_abs", "lon_sin", "lon_cos", "heat_index",
+]
 
-# ─── IQR outlier capping ──────────────────────────────────────────────────────
+MISSING_LST_PROVENANCE = "missing_lst_no_covering_composite"
 
-def cap_outliers(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+
+def candidate_features() -> list[str]:
+    """Candidate model inputs, before fold-local constant/duplicate removal."""
+    seen, out = set(), []
+    for c in FEATURE_COLUMNS + EXTRA_FEATURES:
+        if c in DEFINITIONAL_DUPLICATE_FEATURES or c in seen:
+            continue
+        out.append(c)
+        seen.add(c)
+    return out
+
+
+def slugify(text: str) -> str:
+    text = unicodedata.normalize("NFKD", str(text)).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+# ─── Descriptive IQR outlier report (NOT applied to the data) ─────────────────
+
+def describe_outliers(df: pd.DataFrame) -> dict:
     """
-    Winsorise each weather/satellite column to [Q1 − 1.5·IQR, Q3 + 1.5·IQR].
-    Returns the capped dataframe and a stats dict for dashboard display.
+    Tukey-fence (Q1 − 1.5·IQR, Q3 + 1.5·IQR) counts per column, for display.
+    Capping itself is done fold-locally by evaluation.Winsorizer so that
+    held-out cities never influence the fences.
     """
-    df = df.copy()
     stats = {}
-    avail = [c for c in _OUTLIER_CAP_COLS if c in df.columns]
-
-    for col in avail:
-        q1  = df[col].quantile(0.25)
-        q3  = df[col].quantile(0.75)
+    for col in [c for c in _OUTLIER_CAP_COLS if c in df.columns]:
+        s = df[col].dropna()
+        if s.empty:
+            continue
+        q1, q3 = s.quantile(0.25), s.quantile(0.75)
         iqr = q3 - q1
-        lo  = q1 - 1.5 * iqr
-        hi  = q3 + 1.5 * iqr
-        n_low  = int((df[col] < lo).sum())
-        n_high = int((df[col] > hi).sum())
-        n_total = n_low + n_high
-        if n_total > 0:
-            df[col] = df[col].clip(lower=lo, upper=hi)
+        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        n_low, n_high = int((s < lo).sum()), int((s > hi).sum())
         stats[col] = {
-            "q1":       round(float(q1),  3),
-            "q3":       round(float(q3),  3),
-            "iqr":      round(float(iqr), 3),
-            "lower_fence": round(float(lo), 3),
-            "upper_fence": round(float(hi), 3),
-            "n_low":    n_low,
-            "n_high":   n_high,
-            "n_capped": n_total,
-            "pct":      round(100 * n_total / max(len(df), 1), 2),
+            "q1": round(float(q1), 3), "q3": round(float(q3), 3),
+            "iqr": round(float(iqr), 3),
+            "lower_fence": round(float(lo), 3), "upper_fence": round(float(hi), 3),
+            "n_low": n_low, "n_high": n_high, "n_capped": n_low + n_high,
+            "pct": round(100 * (n_low + n_high) / max(len(s), 1), 2),
+            "note": "descriptive, full dataset; capping is applied fold-locally",
         }
-        if n_total > 0:
-            log.info(
-                f"  Capped '{col}': {n_total} outliers "
-                f"({n_low} below {lo:.2f}, {n_high} above {hi:.2f})"
-            )
-    total_capped = sum(s["n_capped"] for s in stats.values())
-    log.info(f"  Total outliers capped: {total_capped} across {len(avail)} columns")
-    return df, stats
+    return stats
 
 
-# ─── UHI intensity computation (LST-based, dynamic) ──────────────────────────
+# Backward-compatible name used by older code/notebooks
+def cap_outliers(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Deprecated: returns the data UNCHANGED plus descriptive stats."""
+    return df.copy(), describe_outliers(df)
+
+
+# ─── UHI target (observed only, signed) ───────────────────────────────────────
 
 def compute_uhi_intensity(df: pd.DataFrame) -> pd.DataFrame:
     """
-    UHI intensity (°C) = urban_LST − rural_LST (clipped ≥ 0).
+    UHI intensity (°C) = urban_LST − rural_LST, signed.
 
-    Rows with valid LST pairs get the real satellite-derived target.
-    Rows without LST (cloud cover, missed composite) get the city-level
-    median UHI as a fallback so dataset size stays stable. (Fix #6)
+    Rows with both LST values get the satellite-derived target and provenance
+    ``observed_modis_lst_difference``.  All other rows keep target = NaN and
+    provenance ``missing_lst_no_covering_composite``; they remain available
+    for mapping/inference but are excluded from training, tuning and scoring.
+    Negative values are kept: they mean the urban surface was cooler than the
+    rural reference ring in that composite.
     """
     df = df.copy()
-
     if "urban_lst" not in df.columns or "rural_lst" not in df.columns:
         raise ValueError("urban_lst and rural_lst columns are required.")
 
-    valid = df["urban_lst"].notna() & df["rural_lst"].notna()
-    invalid_count = (~valid).sum()
+    urban = pd.to_numeric(df["urban_lst"], errors="coerce")
+    rural = pd.to_numeric(df["rural_lst"], errors="coerce")
+    valid = urban.notna() & rural.notna()
 
-    df[TARGET_COLUMN] = np.nan
-    df.loc[valid, TARGET_COLUMN] = (
-        (df.loc[valid, "urban_lst"] - df.loc[valid, "rural_lst"]).clip(lower=0)
+    df[TARGET_COLUMN] = np.where(valid, (urban - rural).round(3), np.nan)
+    df[TARGET_PROVENANCE_COLUMN] = np.where(
+        valid, OBSERVED_TARGET_PROVENANCE, MISSING_LST_PROVENANCE
     )
-
-    if invalid_count > 0:
-        # Fill per-city median for rows without LST — keeps rows, avoids bias
-        df[TARGET_COLUMN] = df.groupby("name")[TARGET_COLUMN].transform(
-            lambda s: s.fillna(s.median())
-        )
-        # Global median as last-resort for cities where ALL rows lack LST
-        global_median = df.loc[valid, TARGET_COLUMN].median()
-        df[TARGET_COLUMN] = df[TARGET_COLUMN].fillna(global_median)
-        log.info(
-            f"  {valid.sum()} rows used real LST target; "
-            f"{invalid_count} rows filled with city/global median"
-        )
-
-    df[TARGET_COLUMN] = df[TARGET_COLUMN].clip(lower=0).round(3)
+    obs = df.loc[valid, TARGET_COLUMN]
     log.info(
-        f"  UHI range: [{df[TARGET_COLUMN].min():.2f}, "
-        f"{df[TARGET_COLUMN].max():.2f}] °C  "
-        f"(mean {df[TARGET_COLUMN].mean():.2f} °C)"
+        f"  Target: {int(valid.sum())} observed, {int((~valid).sum())} without LST "
+        f"(left missing).  Observed range [{obs.min():.2f}, {obs.max():.2f}] °C, "
+        f"{int((obs < 0).sum())} negative values kept"
+        if len(obs) else "  Target: no observed LST pairs"
     )
     return df
 
 
-# ─── Feature engineering ──────────────────────────────────────────────────────
+# ─── Feature engineering (row-wise / within-city, no target use) ──────────────
 
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Create all derived features. Requires 'name' column to be present."""
+    """Create derived features.  Missing inputs propagate as NaN."""
     df = df.copy()
 
-    # ── Temporal (from real API timestamps) ───────────────────────────────
     if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        df["hour"]  = df["timestamp"].dt.hour.fillna(12).astype(int)
-        df["month"] = df["timestamp"].dt.month.fillna(6).astype(int)
+        ts = pd.to_datetime(df["timestamp"], errors="coerce")
+        df["hour"] = ts.dt.hour.astype(float)
+        df["month"] = ts.dt.month.astype(float)
     else:
-        df["hour"]  = 12
-        df["month"] = 6
+        df["hour"] = np.nan
+        df["month"] = np.nan
 
-    df["is_daytime"] = ((df["hour"] >= 6) & (df["hour"] <= 18)).astype(int)
-    # Night flag — UHI dynamics differ at night (Fix #4)
-    df["is_night"] = ((df["hour"] < 6) | (df["hour"] > 18)).astype(int)
+    df["is_daytime"] = np.where(df["hour"].isna(), np.nan,
+                                ((df["hour"] >= 6) & (df["hour"] <= 18)).astype(float))
+    df["is_night"] = np.where(df["hour"].isna(), np.nan,
+                              ((df["hour"] < 6) | (df["hour"] > 18)).astype(float))
 
-    # ── Satellite / land cover ────────────────────────────────────────────
-    # Vegetation class: reduces direct NDVI→LST leakage (Fix #2 Option B)
-    df["veg_class"] = pd.cut(
-        df["ndvi"].clip(-1, 1),
-        bins=[-1.0, 0.2, 0.5, 1.0],
-        labels=[0, 1, 2],
-    ).astype(int)
+    ndvi = df["ndvi"].clip(-1, 1)
+    df["veg_class"] = pd.cut(ndvi, bins=[-1.0, 0.2, 0.5, 1.0], labels=[0, 1, 2],
+                             include_lowest=True).astype(float)
 
-    # ── Interaction features ───────────────────────────────────────────────
     df["temp_humidity_interaction"] = df["temperature"] * df["humidity"] / 100
-    df["wind_cooling_effect"]       = (
-        df["wind_speed"] * (df["temperature"] - 20).clip(lower=0)
-    )
-    # Heat retention: built-up area + heat + calm air = UHI driver (Fix #10)
+    df["wind_cooling_effect"] = df["wind_speed"] * (df["temperature"] - 20).clip(lower=0)
     df["heat_retention"] = (
         df["urban_fraction"] * df["temperature"] / (df["wind_speed"] + 1)
     ).round(3)
 
-    # ── Temperature anomaly — city-relative departure (Fix #4) ───────────
-    # Captures "unusually hot day for THIS city" independently of absolute T
+    # Within-city temperature anomaly: uses only that city's own *weather*
+    # (never the target, never other cities).  For a held-out city it is
+    # computed from that city's own feature rows — see docs on limitations.
     if "name" in df.columns:
         df["temp_anomaly"] = (
-            df["temperature"]
-            - df.groupby("name")["temperature"].transform("mean")
+            df["temperature"] - df.groupby("name")["temperature"].transform("mean")
         ).round(3)
     else:
-        df["temp_anomaly"] = 0.0
+        df["temp_anomaly"] = np.nan
 
-    # ── Trigonometric time encoding ────────────────────────────────────────
-    df["hour_sin"]  = np.sin(2 * np.pi * df["hour"]  / 24)
-    df["hour_cos"]  = np.cos(2 * np.pi * df["hour"]  / 24)
+    df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
+    df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
     df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
     df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
 
-    # ── Geographic features ────────────────────────────────────────────────
-    df["lat_abs"]               = df["lat"].abs()
-    df["lon_sin"]               = np.sin(np.deg2rad(df["lon"]))
-    df["lon_cos"]               = np.cos(np.deg2rad(df["lon"]))
+    df["lat_abs"] = df["lat"].abs()
+    df["lon_sin"] = np.sin(np.deg2rad(df["lon"]))
+    df["lon_cos"] = np.cos(np.deg2rad(df["lon"]))
     df["distance_from_equator"] = df["lat"].abs()
 
-    # ── Atmospheric stability proxy ────────────────────────────────────────
     df["heat_index"] = (
         -8.78469475556
-        + 1.61139411    * df["temperature"]
+        + 1.61139411 * df["temperature"]
         + 2.33854883889 * df["humidity"] / 100
-        - 0.14611605   * df["temperature"] * df["humidity"] / 100
+        - 0.14611605 * df["temperature"] * df["humidity"] / 100
     ).round(3)
-
     return df
 
 
-# ─── Full preprocessing pipeline ──────────────────────────────────────────────
+# ─── Full preprocessing ───────────────────────────────────────────────────────
 
-def preprocess(df: pd.DataFrame | None = None, force: bool = False) -> pd.DataFrame:
-    """
-    Full pipeline:  load → filter → impute → validate → engineer →
-                    compute target → select features → scale → save.
-    Saves 'city_name' alongside features so model_trainer can use GroupKFold.
-    """
-    if PROCESSED_DATA_PATH.exists() and not force:
-        log.info(f"Processed data exists. Loading ...")
+_PHYSICAL_RANGES = {
+    "temperature": (-60, 60), "humidity": (0, 100), "wind_speed": (0, 100),
+    "lat": (-90, 90), "lon": (-180, 180),
+}
+
+
+def build_processed_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Pure function: raw rows → modelling table (all rows, target may be NaN)."""
+    df = df.copy()
+    if "source" in df.columns:
+        n0 = len(df)
+        df = df[df["source"].astype(str).str.contains("openweather|openmeteo", na=False)]
+        log.info(f"  Source filter: {n0} → {len(df)} rows")
+    if df.empty:
+        raise ValueError("No real-data rows after source filter. Re-run collection.")
+
+    for col in ["temperature", "humidity", "wind_speed", "pressure", "clouds",
+                "ndvi", "urban_fraction", "lat", "lon", "urban_lst", "rural_lst"]:
+        if col not in df.columns:
+            df[col] = np.nan
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Stateless validity rule: drop rows whose *present* value is physically
+    # impossible; missing values are kept for fold-local imputation.
+    n0 = len(df)
+    for col, (lo, hi) in _PHYSICAL_RANGES.items():
+        df = df[df[col].isna() | df[col].between(lo, hi)]
+    log.info(f"  Removed {n0 - len(df)} physically invalid rows")
+
+    if df["name"].isna().any():
+        raise ValueError("Every row needs a city 'name' (used as CV group).")
+
+    df = engineer_features(df)
+    df = compute_uhi_intensity(df)
+
+    feats = candidate_features()
+    ts = pd.to_datetime(df.get("timestamp"), errors="coerce")
+    out = pd.DataFrame({
+        "observation_id": [f"{slugify(n)}_{d}" for n, d in
+                           zip(df["name"], ts.dt.strftime("%Y-%m-%d"))],
+        GROUP_COLUMN: df["name"].values,
+        "date": ts.dt.strftime("%Y-%m-%d").values,
+        "lst_date": df["lst_date"].values if "lst_date" in df.columns else None,
+    }, index=df.index)
+    for c in feats:
+        out[c] = df[c].values if c in df.columns else np.nan
+    for c in ["urban_fraction", "urban_lst", "rural_lst"]:
+        out[c] = df[c].values
+    out[TARGET_COLUMN] = df[TARGET_COLUMN].values
+    out[TARGET_PROVENANCE_COLUMN] = df[TARGET_PROVENANCE_COLUMN].values
+
+    if out["observation_id"].duplicated().any():
+        dups = out.loc[out["observation_id"].duplicated(), "observation_id"].head(5).tolist()
+        raise ValueError(f"Duplicate (city, date) observations: {dups}")
+    return out.sort_values([GROUP_COLUMN, "date"]).reset_index(drop=True)
+
+
+def preprocess(df: pd.DataFrame | None = None, force: bool = False,
+               raw_path=None) -> pd.DataFrame:
+    if PROCESSED_DATA_PATH.exists() and not force and df is None:
+        log.info("Processed data exists. Loading ...")
         return pd.read_csv(PROCESSED_DATA_PATH)
 
     log.info("=" * 60)
-    log.info("STEP 2 – PREPROCESSING")
+    log.info("STEP 2 – PREPROCESSING (stateless only; fitted steps live in CV folds)")
     log.info("=" * 60)
 
     if df is None:
-        if not RAW_DATA_PATH.exists():
-            raise FileNotFoundError(f"Raw data not found at {RAW_DATA_PATH}")
-        df = pd.read_csv(RAW_DATA_PATH)
-
+        path = raw_path or RAW_DATA_PATH
+        if not path.exists():
+            raise FileNotFoundError(f"Raw data not found at {path}")
+        df = pd.read_csv(path)
     log.info(f"  Input: {df.shape[0]} rows × {df.shape[1]} cols")
 
-    # ── 1. Keep only real API data ─────────────────────────────────────────
-    if "source" in df.columns:
-        n_before = len(df)
-        df = df[df["source"].str.contains("openweather|openmeteo", na=False)].copy()
-        log.info(f"  Source filter: {n_before} → {len(df)} rows")
-
-    if len(df) == 0:
-        raise ValueError("No real-data rows after source filter. Re-run collection.")
-
-    # ── 2. Ensure required columns ─────────────────────────────────────────
-    defaults = {
-        "temperature": 20.0, "humidity": 60.0, "wind_speed": 2.0,
-        "pressure": 1013.0, "clouds": 50, "ndvi": 0.3,
-        "urban_fraction": 0.5, "lat": 0.0, "lon": 0.0,
-        "urban_lst": None, "rural_lst": None,
-    }
-    for col, val in defaults.items():
-        if col not in df.columns:
-            df[col] = val
-
-    # ── 3. Impute weather columns; leave LST as NaN (handled in step 6) ───
-    lst_cols  = {"urban_lst", "rural_lst"}
-    imp_cols  = [
-        c for c in df.select_dtypes(include=[np.number]).columns
-        if c not in lst_cols
-    ]
-    missing   = df[imp_cols].isnull().sum().sum()
-    df[imp_cols] = df[imp_cols].fillna(df[imp_cols].median())
-    log.info(f"  Imputed {missing} missing weather values (LST columns untouched)")
-
-    # ── 4. Remove physically invalid rows ─────────────────────────────────
-    n_before = len(df)
-    df = df[df["temperature"].between(-60, 60)]
-    df = df[df["humidity"].between(0, 100)]
-    df = df[df["wind_speed"].between(0, 100)]
-    df = df[df["lat"].between(-90, 90)]
-    df = df[df["lon"].between(-180, 180)]
-    log.info(f"  Removed {n_before - len(df)} physically invalid rows")
-
-    # ── 4b. IQR outlier capping (winsorisation) ───────────────────────────
-    log.info("  Running IQR outlier capping ...")
-    df, outlier_stats = cap_outliers(df)
     with open(OUTLIER_STATS_PATH, "w") as f:
-        json.dump(outlier_stats, f, indent=2)
-    log.info(f"  Outlier stats saved → {OUTLIER_STATS_PATH}")
+        json.dump(describe_outliers(df), f, indent=2)
 
-    # ── 5. Feature engineering ────────────────────────────────────────────
-    df = engineer_features(df)
-    log.info("  Feature engineering complete")
-
-    # ── 6. Compute LST-based UHI target (fill missing with median) ────────
-    df = compute_uhi_intensity(df)
-
-    # ── 7. Select and order final feature set ─────────────────────────────
-    extended = FEATURE_COLUMNS + [
-        "hour_sin", "hour_cos", "month_sin", "month_cos",
-        "lat_abs", "lon_sin", "lon_cos", "heat_index",
-    ]
-    seen, available = set(), []
-    for c in extended:
-        if c in df.columns and c not in seen:
-            available.append(c)
-            seen.add(c)
-
-    # ── 8. Fit and save scaler ────────────────────────────────────────────
-    df_final = df[available + [TARGET_COLUMN]].copy()
-
-    scaler = StandardScaler()
-    df_scaled = df_final.copy()
-    df_scaled[available] = scaler.fit_transform(df_final[available])
-
-    with open(SCALER_PATH, "wb") as f:
-        pickle.dump(scaler, f)
+    out = build_processed_table(df)
     with open(FEATURES_PATH, "w") as f:
-        json.dump(available, f)
-
-    log.info(f"  Scaler saved → {SCALER_PATH}")
-    log.info(f"  Features ({len(available)}): {available}")
-
-    # ── 9. Save processed data with city_name for GroupKFold ──────────────
-    df_final["city_name"] = df["name"].values
-    df_final.to_csv(PROCESSED_DATA_PATH, index=False)
-    log.info(f"  Saved {len(df_final)} rows → {PROCESSED_DATA_PATH}")
-
-    return df_final
+        json.dump(candidate_features(), f)
+    out.to_csv(PROCESSED_DATA_PATH, index=False)
+    log.info(f"  Saved {len(out)} rows → {PROCESSED_DATA_PATH}")
+    return out
 
 
 if __name__ == "__main__":

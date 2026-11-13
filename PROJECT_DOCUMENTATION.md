@@ -3,6 +3,19 @@
 **Subject:** Artificial Intelligence & Machine Learning (PBL)
 **Topic:** Data-driven UHI Estimation using Weather + Satellite Proxies
 
+> **⚠️ Methodology superseded (evaluation v2.0).** The training/evaluation procedure
+> described below (single `GroupShuffleSplit`, selection of the "best model" by
+> test-city RMSE, global median imputation / IQR capping / scaling before
+> splitting, city-median filling of missing UHI targets, clipping UHI at 0, and
+> "test residuals" computed on the full dataset) produced optimistic or invalid
+> numbers and has been replaced. The current procedure is nested
+> leave-one-city-out cross-validation with fold-local preprocessing, observed
+> (non-imputed, signed) targets only, a mean baseline and a latitude+NDVI
+> baseline, and city-bootstrap confidence intervals. See
+> [docs/EVALUATION_METHODOLOGY.md](docs/EVALUATION_METHODOLOGY.md) and
+> [evaluation/metrics.json](evaluation/metrics.json). Any RMSE / R² / skill
+> values quoted in this document are historical and must not be cited.
+
 ---
 
 ## Table of Contents

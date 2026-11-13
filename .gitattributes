@@ -1,0 +1,4 @@
+# Evaluation artifacts and the data snapshot are checksummed in
+# evaluation/metrics.json — store them byte-for-byte (no EOL conversion).
+evaluation/** -text
+data/*.csv -text

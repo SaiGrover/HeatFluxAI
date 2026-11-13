@@ -50,11 +50,15 @@ def step_preprocess():
     log.info("──────────────────────────────────────────")
 
     if PROCESSED_DATA_PATH.exists():
-        log.info("  ✓ Processed data exists. Skipping.")
-        return
+        with open(PROCESSED_DATA_PATH, encoding="utf-8") as f:
+            header = f.readline()
+        if "target_provenance" in header:
+            log.info("  ✓ Processed data exists. Skipping.")
+            return
+        log.info("  Processed data is in the legacy format (imputed/clipped target) — rebuilding.")
 
     from preprocessor import preprocess
-    preprocess()
+    preprocess(force=True)
 
 
 def step_train():
@@ -68,7 +72,10 @@ def step_train():
 
     from model_trainer import train
     metrics = train()
-    log.info(f"  🏆 Best: {metrics['best_model']}  RMSE={metrics['best_rmse']}")
+    sel = metrics["models"]["nested_selected_model"]
+    base = metrics["models"]["mean_baseline"]
+    log.info(f"  Held-out cities (nested LOCO): selected pipeline macro RMSE "
+             f"{sel['macro_rmse']:.3f} °C vs mean baseline {base['macro_rmse']:.3f} °C")
 
 
 def step_dashboard():

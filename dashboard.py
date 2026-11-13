@@ -1,6 +1,6 @@
 """
 UHI Estimation System — Streamlit Dashboard  ✦ Elite Dark Edition ✦
-ERA5 · MODIS 8-day LST · 25 global cities · GroupKFold ML pipeline
+ERA5 · MODIS 8-day LST · 25 global cities · nested leave-one-city-out evaluation
 """
 
 import json, math, pickle, warnings
@@ -15,20 +15,26 @@ from scipy import stats as scipy_stats
 
 warnings.filterwarnings("ignore")
 
-from config import (
-    RAW_DATA_PATH, PROCESSED_DATA_PATH, BEST_MODEL_PATH,
-    METRICS_PATH, SCALER_PATH, FEATURES_PATH, COLORS, CITIES, MODEL_DIR,
-)
-
-OUTLIER_STATS_PATH = MODEL_DIR / "outlier_stats.json"
-
 # ─── Page config ──────────────────────────────────────────────────────────────
+# Must be the first Streamlit command: importing config reads st.secrets.
 st.set_page_config(
     page_title="UHI Estimation System",
     page_icon="🌡️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+from config import (
+    RAW_DATA_PATH, PROCESSED_DATA_PATH, BEST_MODEL_PATH,
+    METRICS_PATH, FEATURES_PATH, COLORS, CITIES, MODEL_DIR,
+    HELDOUT_PREDICTIONS_PATH, SNAPSHOT_DATA_PATH,
+)
+from eval_artifacts import (
+    MODEL_DISPLAY_NAMES, load_evaluation, per_city_frame, residual_label,
+    summary_rows,
+)
+
+OUTLIER_STATS_PATH = MODEL_DIR / "outlier_stats.json"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ✦  ELITE CSS  ✦
@@ -596,57 +602,84 @@ hr {{ border-color: {COLORS['border']} !important; margin:1.2rem 0 !important; }
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=300)
 def load_raw_data():
+    """Collected raw data; falls back to the committed evaluation snapshot."""
     try:
-        return pd.read_csv(RAW_DATA_PATH) if RAW_DATA_PATH.exists() else None
+        for path in (RAW_DATA_PATH, SNAPSHOT_DATA_PATH):
+            if path.exists():
+                return pd.read_csv(path)
     except Exception:
         return None
+    return None
 
 @st.cache_data(ttl=300)
 def load_processed_data():
+    """Modelling table (stateless preprocessing only).  Old-format files that
+    lack target provenance (they contained median-imputed, clipped targets) are
+    rebuilt from the raw data instead of being displayed."""
     try:
-        return pd.read_csv(PROCESSED_DATA_PATH) if PROCESSED_DATA_PATH.exists() else None
+        if PROCESSED_DATA_PATH.exists():
+            df = pd.read_csv(PROCESSED_DATA_PATH)
+            if "target_provenance" in df.columns:
+                return df
+        raw = load_raw_data()
+        if raw is None:
+            return None
+        from preprocessor import build_processed_table
+        return build_processed_table(raw)
     except Exception:
         return None
 
 @st.cache_resource
 def load_model():
+    """Deployment sklearn Pipeline (raw features in).  Legacy pickles that
+    expected externally scaled input are ignored rather than mis-used."""
     try:
         if BEST_MODEL_PATH.exists():
             with open(BEST_MODEL_PATH, "rb") as f:
-                return pickle.load(f)
+                m = pickle.load(f)
+            if hasattr(m, "named_steps") and "preprocess" in m.named_steps:
+                return m
     except Exception:
         return None
     return None
 
 @st.cache_resource
-def load_scaler():
+def load_display_scaler(_proc_df, feat_names_key):
+    """Imputer+StandardScaler fitted on the full table for DISPLAY ONLY
+    (scaled-input bars, city similarity).  Never used by the model, whose
+    preprocessing lives inside its own fitted pipeline."""
     try:
-        if SCALER_PATH.exists():
-            with open(SCALER_PATH, "rb") as f:
-                return pickle.load(f)
+        from sklearn.impute import SimpleImputer
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+        cols = list(feat_names_key)
+        return make_pipeline(SimpleImputer(strategy="median", keep_empty_features=True),
+                             StandardScaler()).fit(_proc_df[cols].to_numpy(float))
     except Exception:
         return None
-    return None
 
-@st.cache_data
+
+@st.cache_data(ttl=300)
+def load_eval_view():
+    return load_evaluation(METRICS_PATH, HELDOUT_PREDICTIONS_PATH)
+
 def load_metrics():
-    try:
-        if METRICS_PATH.exists():
-            with open(METRICS_PATH) as f:
-                return json.load(f)
-    except Exception:
-        return None
-    return None
+    """metrics.json only when it is a validated nested-LOCO evaluation."""
+    view = load_eval_view()
+    return view.metrics if view.ok else None
 
 @st.cache_data
 def load_feature_names():
+    """Candidate model inputs (the deployment pipeline drops constant and
+    duplicate columns internally)."""
     try:
         if FEATURES_PATH.exists():
             with open(FEATURES_PATH) as f:
                 return json.load(f)
+        from preprocessor import candidate_features
+        return candidate_features()
     except Exception:
         return None
-    return None
 
 @st.cache_data(ttl=300)
 def load_outlier_stats():
@@ -746,13 +779,27 @@ def build_input(temp, hum, wind, ndvi_val, uf, lat, lon,
     return [m.get(f, 0.0) for f in feat_names]
 
 
+def predict_uhi(rows):
+    """Deployment-pipeline prediction from raw feature vectors (signed °C)."""
+    X = pd.DataFrame(np.atleast_2d(np.asarray(rows, dtype=float)), columns=feat_names)
+    return model.predict(X)
+
+
+def sel_metric(m, key, model_key="nested_selected_model"):
+    try:
+        return m["models"][model_key][key]
+    except Exception:
+        return None
+
+
 MONTH_NAMES = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
                7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
 
 # UHI severity reference table data
 SEV_LEVELS = [
-    ("< 1 °C",  "Negligible", "#3fb950", "Urban area barely warmer than surroundings. Dense vegetation or coastal breeze likely."),
-    ("1 – 2 °C","Low",        "#58a6ff", "Mild warming. Common in cities with parks & low building density."),
+    ("< 0 °C",  "Cool island","#58a6ff", "Urban surface cooler than its rural reference (common where surroundings are desert or bare soil). A valid observation, not an error."),
+    ("0 – 1 °C","Negligible", "#3fb950", "Urban area barely warmer than surroundings. Dense vegetation or coastal breeze likely."),
+    ("1 – 2 °C","Low",        "#3fb950", "Mild warming. Common in cities with parks & low building density."),
     ("2 – 3 °C","Moderate",   "#d29922", "Noticeable heat island. Higher energy demand; vulnerable populations at risk during heatwaves."),
     ("3 – 5 °C","High",       "#f85149", "Strong UHI. Significant health risk. Typical of dense megacities in summer."),
     ("> 5 °C",  "Extreme",    "#ff6b6b", "Extreme heat island. Life-threatening during heatwaves. Urgent green-infrastructure needed."),
@@ -788,12 +835,11 @@ def render_ticker(proc_df_t, metrics_t, raw_df_t):
         items.append(("🛰 Raw Samples", f"{len(raw_df_t):,}"))
     if metrics_t:
         items += [
-            ("🤖 Best Model", metrics_t.get("best_model","—")),
-            ("📉 Best RMSE",  f"{metrics_t.get('best_rmse','—')} °C"),
+            ("🧪 Held-out cities", str(metrics_t["dataset"]["n_cities"])),
+            ("📉 ML held-out RMSE", f"{sel_metric(metrics_t,'macro_rmse'):.2f} °C"),
+            ("📏 Mean-baseline RMSE",
+             f"{sel_metric(metrics_t,'macro_rmse','mean_baseline'):.2f} °C"),
         ]
-        best_sk = metrics_t["models"].get(metrics_t.get("best_model",""),{}).get("skill_vs_baseline")
-        if best_sk is not None:
-            items.append(("⚡ Skill Score", f"+{best_sk*100:.1f}%"))
     if not items:
         return
     # Duplicate for seamless scroll
@@ -872,7 +918,7 @@ def render_feature_contributions(vec_vals, feat_names_list, base_val=0.0):
     note = (
         f'<div style="font-size:0.7rem;color:{COLORS["subtext"]};'
         f'font-family:\'JetBrains Mono\',monospace;margin-top:0.6rem">'
-        f'Values are post-StandardScaler. Positive&nbsp;=&nbsp;above&nbsp;mean.</div>'
+        f'Standardised against the dataset for display; the model applies its own fold-fitted preprocessing.</div>'
     )
     card = (
         f'<div class="neon-card" style="padding:1rem 1.2rem">'
@@ -909,12 +955,14 @@ with st.sidebar:
     feat_names = load_feature_names()
 
     if metrics:
-        best    = metrics.get("best_model","—")
-        b_rmse  = metrics.get("best_rmse","—")
-        base_r  = metrics.get("baseline_rmse")
-        skill_v = metrics["models"].get(best,{}).get("skill_vs_baseline")
-        mae_v   = metrics["models"].get(best,{}).get("mae","—")
-        r2_v    = metrics["models"].get(best,{}).get("r2","—")
+        _sel_rmse = sel_metric(metrics, "macro_rmse")
+        _sel_mae  = sel_metric(metrics, "macro_mae")
+        _bl_rmse  = sel_metric(metrics, "macro_rmse", "mean_baseline")
+        _n_cit    = metrics["dataset"]["n_cities"]
+        _cell = lambda lbl, val, c: (
+            f"<div style='background:rgba(255,255,255,0.03);border-radius:7px;padding:0.4rem;text-align:center'>"
+            f"<div style='color:{COLORS['subtext']};font-size:0.6rem;text-transform:uppercase'>{lbl}</div>"
+            f"<div style='color:{c};font-weight:700;font-family:JetBrains Mono,monospace;font-size:0.82rem'>{val}</div></div>")
         st.markdown(f"""
         <div style="background:linear-gradient(135deg,{COLORS['card']},{COLORS['card2']});
                     border:1px solid {COLORS['border']};border-radius:14px;
@@ -922,34 +970,20 @@ with st.sidebar:
                     border-left:3px solid {COLORS['accent']};margin-bottom:0.6rem">
             <div style="color:{COLORS['subtext']};font-size:0.62rem;font-weight:800;
                         text-transform:uppercase;letter-spacing:0.12em;margin-bottom:0.5rem">
-                🏆 Best Model
+                🧪 Held-out city evaluation
             </div>
-            <div style="color:{COLORS['primary']};font-weight:800;font-size:1rem;
-                        font-family:'Space Grotesk',sans-serif">{best}</div>
+            <div style="color:{COLORS['primary']};font-weight:800;font-size:0.9rem;
+                        font-family:'Space Grotesk',sans-serif">Nested leave-one-city-out</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-top:0.6rem">
-                <div style="background:rgba(255,255,255,0.03);border-radius:7px;
-                            padding:0.4rem;text-align:center">
-                    <div style="color:{COLORS['subtext']};font-size:0.6rem;text-transform:uppercase">RMSE</div>
-                    <div style="color:{COLORS['text']};font-weight:700;font-family:'JetBrains Mono',monospace;font-size:0.82rem">{b_rmse}°C</div>
-                </div>
-                <div style="background:rgba(255,255,255,0.03);border-radius:7px;
-                            padding:0.4rem;text-align:center">
-                    <div style="color:{COLORS['subtext']};font-size:0.6rem;text-transform:uppercase">MAE</div>
-                    <div style="color:{COLORS['text']};font-weight:700;font-family:'JetBrains Mono',monospace;font-size:0.82rem">{mae_v}°C</div>
-                </div>
-                <div style="background:rgba(255,255,255,0.03);border-radius:7px;
-                            padding:0.4rem;text-align:center">
-                    <div style="color:{COLORS['subtext']};font-size:0.6rem;text-transform:uppercase">R²</div>
-                    <div style="color:{COLORS['text']};font-weight:700;font-family:'JetBrains Mono',monospace;font-size:0.82rem">{r2_v}</div>
-                </div>
-                <div style="background:rgba(255,255,255,0.03);border-radius:7px;
-                            padding:0.4rem;text-align:center">
-                    <div style="color:{COLORS['subtext']};font-size:0.6rem;text-transform:uppercase">Skill</div>
-                    <div style="color:{COLORS['accent']};font-weight:700;font-family:'JetBrains Mono',monospace;font-size:0.82rem">+{skill_v*100:.1f}%</div>
-                </div>
+                {_cell("ML RMSE", f"{_sel_rmse:.2f}°C", COLORS['text'])}
+                {_cell("ML MAE", f"{_sel_mae:.2f}°C", COLORS['text'])}
+                {_cell("Mean-BL RMSE", f"{_bl_rmse:.2f}°C", COLORS['warning'])}
+                {_cell("Cities", _n_cit, COLORS['accent'])}
             </div>
-            {"<div style='margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid " + COLORS['border'] + ";font-size:0.7rem;color:" + COLORS['subtext'] + "'>Baseline RMSE <b style=color:" + COLORS['text'] + ">" + str(base_r) + "°C</b></div>" if base_r else ""}
+            <div style='margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid {COLORS['border']};font-size:0.66rem;color:{COLORS['subtext']}'>Macro averages over held-out cities. See Models tab.</div>
         </div>""", unsafe_allow_html=True)
+    else:
+        st.caption("No validated held-out evaluation found.")
 
     # Status dots
     checks = [
@@ -972,10 +1006,12 @@ with st.sidebar:
     st.markdown("<hr>", unsafe_allow_html=True)
     refresh_city_count = st.slider(
         "Live refresh cities",
-        min_value=3,
+        min_value=4,
         max_value=len(CITIES),
         value=min(5, len(CITIES)),
-        help="Use fewer cities on Streamlit Cloud to avoid killing the session.",
+        help="Use fewer cities on Streamlit Cloud to avoid killing the session. "
+             "Nested leave-one-city-out evaluation needs at least 4 cities with "
+             "observed LST; confidence intervals need at least 8.",
     )
     run_training = st.checkbox(
         "Train model after refresh",
@@ -1013,9 +1049,13 @@ with st.sidebar:
 raw_df        = load_raw_data()
 proc_df       = load_processed_data()
 model         = load_model()
-scaler        = load_scaler()
-metrics       = load_metrics()
+eval_view     = load_eval_view()
+metrics       = eval_view.metrics if eval_view.ok else None
 feat_names    = load_feature_names()
+if feat_names is None and model is not None:
+    feat_names = list(getattr(model, "feature_names_in_", [])) or None
+scaler        = (load_display_scaler(proc_df, tuple(feat_names))
+                 if proc_df is not None and feat_names else None)
 outlier_stats = load_outlier_stats()
 
 
@@ -1026,7 +1066,7 @@ if nav == "📊  Overview":
 
     # Hero
     tags = ["ERA5 reanalysis", "MODIS 8-day LST", "25 global cities",
-            "GroupKFold evaluation", "GridSearchCV", "Zero synthetic data"]
+            "Nested leave-one-city-out", "Observed targets only", "Zero synthetic data"]
     tag_html = "".join(f'<span class="hero-tag">{t}</span>' for t in tags)
     st.markdown(f"""
     <div class="hero">
@@ -1046,18 +1086,18 @@ if nav == "📊  Overview":
     n_raw   = f"{len(raw_df):,}"  if raw_df  is not None else "—"
     n_proc  = f"{len(proc_df):,}" if proc_df is not None else "—"
     n_feat  = len(feat_names) if feat_names else "—"
-    n_model = len(metrics["models"]) if metrics else "—"
-    b_rmse  = f"{metrics['best_rmse']} °C" if metrics else "—"
-    skill_s = (f"+{metrics['models'].get(metrics['best_model'],{}).get('skill_vs_baseline',0)*100:.0f}%"
+    n_model = metrics["dataset"]["n_cities"] if metrics else "—"
+    b_rmse  = f"{sel_metric(metrics,'macro_rmse'):.2f} °C" if metrics else "—"
+    skill_s = (f"{sel_metric(metrics,'macro_rmse') - sel_metric(metrics,'macro_rmse','mean_baseline'):+.2f} °C"
                if metrics else "—")
 
     c1,c2,c3,c4,c5,c6 = st.columns(6)
     kpi(c1,"🛰️", n_raw,  "Raw Samples",    "ERA5 + GEE rows",   COLORS["primary"])
     kpi(c2,"⚙️", n_proc, "Processed Rows", "after pipeline",    COLORS["secondary"])
     kpi(c3,"🔬", n_feat, "Features",        "engineered",        COLORS["accent"])
-    kpi(c4,"🤖", n_model,"Models",          "GridSearch-tuned",  COLORS["warning"])
-    kpi(c5,"📉", b_rmse, "Best RMSE",       metrics.get("best_model","") if metrics else "", COLORS["danger"])
-    kpi(c6,"⚡", skill_s,"Skill Score",     "vs mean baseline",  COLORS["accent"])
+    kpi(c4,"🧪", n_model,"Held-out Cities", "nested LOCO folds", COLORS["warning"])
+    kpi(c5,"📉", b_rmse, "Held-out RMSE",   "selected ML · macro", COLORS["danger"])
+    kpi(c6,"📏", skill_s,"vs Mean Baseline","RMSE difference (− = better)", COLORS["accent"])
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1065,8 +1105,8 @@ if nav == "📊  Overview":
     sec("⚙️ Pipeline Status")
     steps = [
         ("01","Data Collection",  raw_df  is not None,"🛰️","ERA5 + MODIS via GEE",COLORS["primary"]),
-        ("02","Preprocessing",    proc_df is not None,"⚙️","IQR cap + 26 features",COLORS["secondary"]),
-        ("03","Model Training",   metrics is not None,"🤖","GroupKFold + GridSearch",COLORS["accent"]),
+        ("02","Preprocessing",    proc_df is not None,"⚙️","stateless; fitted steps per fold",COLORS["secondary"]),
+        ("03","Model Training",   metrics is not None,"🤖","nested leave-one-city-out",COLORS["accent"]),
         ("04","Dashboard",        True,               "📊","Streamlit on :8505",COLORS["warning"]),
     ]
     pipe_cols = st.columns(4)
@@ -1179,13 +1219,16 @@ if nav == "📊  Overview":
                 city_agg = None
 
             if city_agg is not None and not city_agg.empty:
+                city_agg = city_agg.dropna(subset=["lat","lon","uhi_intensity"])
+                city_agg["|UHI|"] = city_agg["uhi_intensity"].abs() + 0.2
                 fig3 = px.scatter_mapbox(
-                    city_agg.dropna(subset=["lat","lon"]),
+                    city_agg,
                     lat="lat", lon="lon",
-                    color="uhi_intensity", size="uhi_intensity",
+                    color="uhi_intensity", size="|UHI|",
                     hover_name="city_name",
-                    hover_data={"uhi_intensity":":.2f","lat":False,"lon":False},
-                    color_continuous_scale=[[0,COLORS["accent"]],[0.4,COLORS["warning"]],[1,COLORS["danger"]]],
+                    hover_data={"uhi_intensity":":.2f","lat":False,"lon":False,"|UHI|":False},
+                    color_continuous_scale=[[0,COLORS["primary"]],[0.5,"#e6edf3"],[1,COLORS["danger"]]],
+                    color_continuous_midpoint=0,
                     size_max=28, zoom=1.1, mapbox_style="carto-darkmatter",
                 )
                 fig3.update_layout(
@@ -1259,7 +1302,7 @@ elif nav == "📁  Data Explorer":
         else:
             c1,c2,c3 = st.columns(3)
             c1.metric("Rows",     f"{len(proc_df):,}")
-            c2.metric("Features", len(proc_df.columns)-2)
+            c2.metric("Candidate features", len(feat_names) if feat_names else "—")
             if "uhi_intensity" in proc_df.columns:
                 c3.metric("UHI Range",
                           f"{proc_df['uhi_intensity'].min():.1f}–{proc_df['uhi_intensity'].max():.1f}°C")
@@ -1292,11 +1335,9 @@ elif nav == "📁  Data Explorer":
         else:
             sec("📈 UHI Intensity — Time Series per City")
             # Merge timestamps
-            if "timestamp" in raw_df.columns and "city_name" in proc_df.columns:
+            if "date" in proc_df.columns and "city_name" in proc_df.columns:
                 ts_df = proc_df.copy()
-                ts_df["timestamp"] = pd.to_datetime(
-                    raw_df["timestamp"].values[:len(ts_df)], errors="coerce")
-                ts_df["date"] = ts_df["timestamp"].dt.date
+                ts_df["date"] = pd.to_datetime(ts_df["date"], errors="coerce").dt.date
 
                 city_list = sorted(ts_df["city_name"].dropna().unique().tolist())
                 sel_cities = st.multiselect("Select cities", city_list,
@@ -1314,7 +1355,7 @@ elif nav == "📁  Data Explorer":
                             hovertemplate=f"<b>{city}</b><br>%{{x}}<br>UHI: %{{y:.2f}}°C<extra></extra>",
                         ))
                     fig.update_layout(
-                        title="Daily mean UHI intensity (180-day window)",
+                        title="Observed UHI (8-day MODIS composites; gaps = no observed LST, not imputed)",
                         xaxis_title="Date", yaxis_title="UHI (°C)",
                         hovermode="x unified", **_PL)
                     st.plotly_chart(fig, use_container_width=True)
@@ -1392,7 +1433,8 @@ elif nav == "📁  Data Explorer":
 elif nav == "🔬  Preprocessing":
     st.markdown('<div style="height:1.5rem"></div>', unsafe_allow_html=True)
     sec("🔬 Preprocessing & Feature Engineering",
-        "Data cleaning · IQR outlier capping · 26-feature engineering · LST-based UHI target")
+        "Stateless cleaning & feature engineering here · imputation, IQR capping, scaling and "
+        "constant/duplicate removal are fitted inside each CV fold · signed, observed-only UHI target")
 
     if raw_df is None or proc_df is None:
         st.warning("Run the pipeline first: `python main.py`")
@@ -1430,8 +1472,21 @@ elif nav == "🔬  Preprocessing":
 
         # ── Outlier section ─────────────────────────────────────────────────
         st.markdown("<hr>", unsafe_allow_html=True)
-        sec("📦 Outlier Detection & IQR Capping",
-            "Winsorisation: values outside [Q1−1.5·IQR, Q3+1.5·IQR] are capped, not dropped")
+        if "target_provenance" in proc_df.columns:
+            sec("🎯 Target provenance",
+                "Only observed MODIS LST differences are used for training, tuning and scoring")
+            prov = proc_df["target_provenance"].value_counts()
+            obs_y = proc_df.loc[proc_df["target_provenance"] == "observed_modis_lst_difference",
+                                "uhi_intensity"]
+            t1, t2, t3, t4 = st.columns(4)
+            t1.metric("Observed targets", f"{int(prov.get('observed_modis_lst_difference', 0)):,}")
+            t2.metric("Excluded (no LST, not imputed)", f"{int(len(proc_df) - len(obs_y)):,}")
+            t3.metric("Negative UHI kept", f"{int((obs_y < 0).sum()):,}")
+            t4.metric("Observed range", f"{obs_y.min():.1f} … {obs_y.max():.1f} °C" if len(obs_y) else "—")
+            st.markdown("<hr>", unsafe_allow_html=True)
+        sec("📦 Outlier Detection (descriptive)",
+            "Tukey fences [Q1−1.5·IQR, Q3+1.5·IQR] on the full table, for inspection only — "
+            "the model's capping fences are re-learned on each training fold")
 
         if outlier_stats:
             cap_cols = [c for c,s in outlier_stats.items() if s["n_capped"]>0]
@@ -1469,7 +1524,7 @@ elif nav == "🔬  Preprocessing":
             # Box plots raw vs capped
             avail = [c for c in outlier_stats if c in raw_df.columns and c in proc_df.columns]
             if avail:
-                sec("📊 Box Plots: Raw vs Capped")
+                sec("📊 Box Plots with full-table fences")
                 n_c = min(len(avail),3)
                 box_cols = st.columns(n_c)
                 for i,feat in enumerate(avail):
@@ -1481,9 +1536,6 @@ elif nav == "🔬  Preprocessing":
                                             marker=dict(outliercolor=COLORS["warning"],
                                                         symbol="circle-open",size=4),
                                             boxpoints="outliers",line_width=1.5))
-                        fb.add_trace(go.Box(y=proc_df[feat].dropna(),name="Capped",
-                                            marker_color=COLORS["accent"],boxmean="sd",
-                                            boxpoints=False,line_width=1.5))
                         for fence,txt,anchor in [(s["upper_fence"],"↑","bottom right"),
                                                   (s["lower_fence"],"↓","top right")]:
                             fb.add_hline(y=fence,line_dash="dot",
@@ -1566,403 +1618,189 @@ elif nav == "🔬  Preprocessing":
 # ══════════════════════════════════════════════════════════════════════════════
 elif nav == "🤖  Models":
     st.markdown('<div style="height:1.5rem"></div>', unsafe_allow_html=True)
-    sec("🤖 Model Comparison",
-        "GroupShuffleSplit evaluation — entire cities held out · GridSearchCV tuning · 5-fold GroupKFold")
+    sec("🤖 Model Evaluation — Nested Leave-One-City-Out",
+        "Each city is held out once · algorithm + hyper-parameters chosen by inner GroupKFold "
+        "on the other cities · fold-local preprocessing · observed (non-imputed) targets only")
 
-    if metrics is None:
-        st.warning("No trained models found. Run `python main.py` first.")
+    if not eval_view.ok:
+        st.warning(eval_view.message)
     else:
-        best       = metrics["best_model"]
-        mdata      = metrics["models"]
-        base_rmse  = metrics.get("baseline_rmse")
-        base_mae   = metrics.get("baseline_mae")
-        train_c    = metrics.get("train_cities",[])
-        test_c     = metrics.get("test_cities",[])
+        ev_m   = eval_view.metrics
+        ev_p   = eval_view.predictions
+        ds     = ev_m["dataset"]
+        ev_cfg = ev_m["evaluation"]
+        ci_blk = ev_m["aggregate"]["confidence_intervals"]
 
-        # Train/test city cards
-        if train_c or test_c:
-            ca,cb = st.columns(2)
-            ca.markdown(f"""<div class="glass" style="font-size:0.8rem">
-                <div style="color:{COLORS['subtext']};font-size:0.65rem;font-weight:800;
-                            text-transform:uppercase;letter-spacing:0.1em;margin-bottom:0.4rem">
-                    🏋️ Train Cities ({len(train_c)})</div>
-                <div style="color:{COLORS['primary']};font-weight:600;line-height:1.8">
-                    {' · '.join(train_c)}</div></div>""", unsafe_allow_html=True)
-            cb.markdown(f"""<div class="glass" style="font-size:0.8rem;
-                border-left:3px solid {COLORS['accent']}">
-                <div style="color:{COLORS['subtext']};font-size:0.65rem;font-weight:800;
-                            text-transform:uppercase;letter-spacing:0.1em;margin-bottom:0.4rem">
-                    🧪 Test Cities ({len(test_c)}) — unseen during training</div>
-                <div style="color:{COLORS['accent']};font-weight:600;line-height:1.8">
-                    {' · '.join(test_c)}</div></div>""", unsafe_allow_html=True)
-            st.markdown("<br>", unsafe_allow_html=True)
-
-        # ── Ranked leaderboard cards ──────────────────────────────────────────
-        sorted_models = sorted(mdata.items(), key=lambda x: x[1]["rmse"])
-        rank_icons = {1:"🥇",2:"🥈",3:"🥉"}
-        rank_cols_list = st.columns(min(len(sorted_models), 4))
-        for ri, (rname, rm) in enumerate(sorted_models[:4]):
-            medal = rank_icons.get(ri+1, f"#{ri+1}")
-            rbg   = [COLORS["accent"],COLORS["primary"],COLORS["secondary"],COLORS["warning"]][ri%4]
-            rank_cols_list[ri].markdown(f"""
-            <div class="kpi-card" style="--kpi-color:{rbg};animation-delay:{ri*0.08}s">
-                <div style="font-size:1.6rem">{medal}</div>
-                <div style="font-weight:800;font-size:0.85rem;color:{rbg};
-                            font-family:'Space Grotesk',sans-serif;margin:0.3rem 0 0.1rem">
-                    {rname}</div>
-                <div style="font-size:0.7rem;color:{COLORS['subtext']};font-family:'JetBrains Mono',monospace">
-                    RMSE {rm['rmse']:.4f}°C</div>
-                <div style="font-size:0.65rem;color:{COLORS['subtext']};font-family:'JetBrains Mono',monospace">
-                    R² {rm['r2']:.4f} · Skill {rm.get('skill_vs_baseline',0):.3f}</div>
+        # ── Methodology card ─────────────────────────────────────────────────
+        st.markdown(f"""<div class="glass" style="font-size:0.8rem;line-height:1.75">
+            <b style="color:{COLORS['primary']}">Outer loop</b> {ev_cfg['outer_cv']} ·
+            <b style="color:{COLORS['primary']}">Inner loop</b> {ev_cfg['inner_cv']} ·
+            <b style="color:{COLORS['primary']}">Selection metric</b> inner-CV RMSE
+            (test cities never used) · seed {ev_cfg['random_seed']}<br>
+            <b>{ds['n_cities']}</b> cities · <b>{ds['n_evaluated_observations']:,}</b> observed targets
+            scored · <b>{ds['n_excluded_targets']:,}</b> rows excluded (no observed LST pair, never imputed) ·
+            <b>{ds['target_summary']['n_negative']:,}</b> negative UHI targets kept ·
+            {ds.get('n_unique_city_lst_composites') or '—'} distinct (city, 8-day composite) targets
             </div>""", unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Summary table
-        rows=[]
-        for name,m in mdata.items():
-            rows.append({"Model":name+(" 🏆" if name==best else ""),
-                         "RMSE":m["rmse"],"MAE":m.get("mae","—"),
-                         "R²":m["r2"],"CV RMSE":m["cv_rmse"],"CV Std":m["cv_std"],
-                         "Skill":m.get("skill_vs_baseline","—")})
-        df_m=pd.DataFrame(rows).sort_values("RMSE")
-        st.dataframe(
-            df_m.style
-            .apply(lambda r:["color:#3fb950;font-weight:700"]*len(r)
-                   if "🏆" in str(r["Model"]) else [""]*len(r), axis=1)
-            .format({"RMSE":"{:.4f}","R²":"{:.4f}","CV RMSE":"{:.4f}","CV Std":"{:.4f}",
-                     "MAE":lambda v:f"{v:.4f}" if isinstance(v,float) else v,
-                     "Skill":lambda v:f"{v:.4f}" if isinstance(v,float) else v}),
-            use_container_width=True, hide_index=True)
+        # ── Comparison table ─────────────────────────────────────────────────
+        sec("📋 Held-out city comparison",
+            "Macro = mean over cities (each city counts once) · Pooled = over all held-out "
+            "observations · 95% CI = city-level bootstrap")
+        rows = summary_rows(ev_m)
+        fmt_ci = lambda v: f"[{v[0]:.2f}, {v[1]:.2f}]" if isinstance(v, list) else "n/a"
+        df_cmp = pd.DataFrame([{
+            "Model": r["Model"], "Macro MAE": r["Macro MAE"], "Macro RMSE": r["Macro RMSE"],
+            "Macro RMSE 95% CI": fmt_ci(r["Macro RMSE 95% CI"]),
+            "Pooled MAE": r["Pooled MAE"], "Pooled RMSE": r["Pooled RMSE"],
+            "Pooled RMSE 95% CI": fmt_ci(r["Pooled RMSE 95% CI"]),
+            "Cities": r["Cities"], "Obs": r["Obs"], "Evaluation": r["Evaluation"],
+        } for r in rows])
+        st.dataframe(df_cmp.style.format({c: "{:.3f}" for c in
+                     ["Macro MAE", "Macro RMSE", "Pooled MAE", "Pooled RMSE"]}),
+                     use_container_width=True, hide_index=True)
+        if ci_blk.get("status") == "unavailable":
+            st.info(f"Confidence intervals not reported: {ci_blk.get('reason')}")
+        else:
+            diffs = ci_blk.get("paired_differences", {})
+            d_mean = diffs.get("nested_selected_model - mean_baseline", {}).get("macro_rmse")
+            if d_mean:
+                st.markdown(f"""<div style="font-size:0.77rem;color:{COLORS['subtext']};margin:0.3rem 0 1rem">
+                    Paired city-bootstrap 95% CI of (selected ML − mean baseline) macro RMSE:
+                    <b style="color:{COLORS['warning']}">[{d_mean[0]:+.2f}, {d_mean[1]:+.2f}] °C</b>
+                    — an interval that includes 0 means no demonstrated improvement over predicting
+                    the training mean. Descriptive only; {ds['n_cities']} cities are few and not a
+                    random sample.</div>""", unsafe_allow_html=True)
 
-        if base_rmse:
-            st.markdown(f"""<div style="font-size:0.77rem;color:{COLORS['subtext']};margin:0.3rem 0 1rem">
-                📏 Baseline (always predict mean): RMSE = <b style="color:{COLORS['warning']}">{base_rmse}°C</b>
-                {f'  ·  MAE = <b style="color:{COLORS["warning"]}">{base_mae}°C</b>' if base_mae else ''}
-                &nbsp;·&nbsp; Skill = <b>1 − model_RMSE / baseline_RMSE</b></div>""",
+        cc1, cc2 = st.columns(2)
+        intervals = ci_blk.get("intervals", {})
+        for col_box, metric_key, title in [(cc1, "macro_rmse", "Macro RMSE (per-city mean)"),
+                                           (cc2, "pooled_rmse", "Pooled RMSE (all observations)")]:
+            with col_box:
+                names = [r["Model"] for r in rows]
+                vals  = [ev_m["models"][r["key"]][metric_key] for r in rows]
+                errs  = [intervals.get(r["key"], {}).get(metric_key) for r in rows]
+                fig = go.Figure(go.Bar(
+                    x=vals, y=names, orientation="h",
+                    marker_color=[COLORS["subtext"], COLORS["secondary"], COLORS["primary"]][:len(rows)],
+                    error_x=dict(type="data", symmetric=False,
+                                 array=[(e[1] - v) if e else 0 for e, v in zip(errs, vals)],
+                                 arrayminus=[(v - e[0]) if e else 0 for e, v in zip(errs, vals)],
+                                 color=COLORS["text"], thickness=1.2),
+                    text=[f"{v:.3f}" for v in vals], textposition="outside",
+                    textfont_color=COLORS["subtext"]))
+                fig.update_layout(title=f"{title} · lower = better", xaxis_title="°C", **_PL)
+                st.plotly_chart(fig, use_container_width=True)
+
+        # ── Per-city results ─────────────────────────────────────────────────
+        st.markdown("<hr>", unsafe_allow_html=True)
+        sec("🏙️ Per-city held-out results",
+            "Each row is one outer fold: the city was unseen during preprocessing, tuning and fitting")
+        pc_df = per_city_frame(ev_m)
+        st.dataframe(pc_df.style.format({c: "{:.3f}" for c in pc_df.columns
+                                         if c.endswith(("MAE", "RMSE"))}),
+                     use_container_width=True, hide_index=True, height=320)
+        long = pc_df.melt(id_vars=["City"], value_vars=["Mean RMSE", "Lat+NDVI RMSE", "ML RMSE"],
+                          var_name="Model", value_name="RMSE")
+        fig_pc = px.bar(long, x="City", y="RMSE", color="Model", barmode="group",
+                        color_discrete_sequence=[COLORS["subtext"], COLORS["secondary"], COLORS["primary"]])
+        fig_pc.update_layout(title="Per-city RMSE on the held-out city", yaxis_title="°C", **_PL)
+        st.plotly_chart(fig_pc, use_container_width=True)
+        fam = ev_m["models"]["nested_selected_model"].get("family_selection_counts", {})
+        if fam:
+            st.markdown(f"""<div style="font-size:0.77rem;color:{COLORS['subtext']}">
+                Algorithm chosen by inner CV across the {ds['n_cities']} outer folds:
+                {' · '.join(f'<b>{k}</b> ×{v}' for k, v in fam.items())}</div>""",
                 unsafe_allow_html=True)
 
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        # ── 4-chart grid ─────────────────────────────────────────────────────
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            bar_c=[COLORS["accent"] if "🏆" in str(n) else COLORS["primary"]
-                   for n in df_m["Model"]]
-            figR=go.Figure(go.Bar(x=df_m["RMSE"],y=df_m["Model"],orientation="h",
-                                  marker_color=bar_c,
-                                  text=df_m["RMSE"].round(4),textposition="outside",
-                                  textfont_color=COLORS["subtext"]))
-            if base_rmse:
-                figR.add_vline(x=base_rmse,line_dash="dash",
-                               line_color=COLORS["warning"],line_width=2,
-                               annotation_text=f"Baseline {base_rmse}",
-                               annotation_font_color=COLORS["warning"])
-            figR.update_layout(title="RMSE  (lower = better)",xaxis_title="°C",**_PL)
-            st.plotly_chart(figR, use_container_width=True)
-
-        with cc2:
-            mae_v=df_m["MAE"].apply(lambda v:v if isinstance(v,float) else 0)
-            bar_c2=[COLORS["accent"] if "🏆" in str(n) else COLORS["secondary"]
-                    for n in df_m["Model"]]
-            figM=go.Figure(go.Bar(x=mae_v,y=df_m["Model"],orientation="h",
-                                  marker_color=bar_c2,
-                                  text=mae_v.round(4),textposition="outside",
-                                  textfont_color=COLORS["subtext"]))
-            if base_mae:
-                figM.add_vline(x=base_mae,line_dash="dash",
-                               line_color=COLORS["warning"],line_width=2,
-                               annotation_text=f"Baseline {base_mae}",
-                               annotation_font_color=COLORS["warning"])
-            figM.update_layout(title="MAE  (lower = better)",xaxis_title="°C",**_PL)
-            st.plotly_chart(figM, use_container_width=True)
-
-        # ── Skill score bar ───────────────────────────────────────────────────
-        skills={n:m.get("skill_vs_baseline",0) for n,m in mdata.items()
-                if isinstance(m.get("skill_vs_baseline"),(int,float))}
-        if skills:
-            sec("⚡ Skill Score vs Baseline")
-            sk_df=pd.DataFrame(sorted(skills.items(),key=lambda x:x[1],reverse=True),
-                               columns=["Model","Skill"])
-            fig_sk=go.Figure(go.Bar(
-                x=sk_df["Skill"], y=sk_df["Model"], orientation="h",
-                marker_color=[COLORS["accent"] if s>0 else COLORS["danger"]
-                              for s in sk_df["Skill"]],
-                text=sk_df["Skill"].round(4), textposition="outside",
-                textfont_color=COLORS["subtext"],
-                hovertemplate="<b>%{y}</b><br>Skill: %{x:.4f}<extra></extra>",
-            ))
-            fig_sk.add_vline(x=0,line_color=COLORS["border"],line_width=1.5)
-            fig_sk.update_layout(title="1 − RMSE/Baseline_RMSE  · green = beats baseline",
-                                 xaxis_title="Skill Score",**_PL)
-            st.plotly_chart(fig_sk, use_container_width=True)
-
-        # ── Model radar comparison ────────────────────────────────────────────
-        sec("🕸️ Model Comparison Radar",
-            "Each axis normalised 0→1 (higher = better on all axes)")
-        radar_cols = st.columns([3,2])
-        with radar_cols[0]:
-            model_names = list(mdata.keys())
-            # normalise RMSE → 1-normalised (lower RMSE → higher score)
-            rmse_vals   = np.array([mdata[n]["rmse"] for n in model_names])
-            mae_vals2   = np.array([mdata[n].get("mae",mdata[n]["rmse"]) for n in model_names])
-            r2_vals     = np.array([max(0,mdata[n]["r2"]) for n in model_names])
-            skill_vals  = np.array([max(0,mdata[n].get("skill_vs_baseline",0)) for n in model_names])
-            cv_stability= np.array([1/(mdata[n]["cv_std"]+0.01) for n in model_names])
-
-            def norm01(a):
-                mn,mx = a.min(), a.max()
-                return (a-mn)/(mx-mn+1e-9) if mx>mn else np.ones_like(a)*0.5
-
-            scores = {
-                "RMSE (inv)":    1 - norm01(rmse_vals),
-                "MAE (inv)":     1 - norm01(mae_vals2),
-                "R²":            norm01(r2_vals),
-                "Skill":         norm01(skill_vals),
-                "CV Stability":  norm01(cv_stability),
-            }
-            axes = list(scores.keys())
-            fig_rad = go.Figure()
-            top5 = sorted(model_names,key=lambda n:mdata[n]["rmse"])[:6]
-            for i,name in enumerate(top5):
-                idx = model_names.index(name)
-                vals = [scores[ax][idx] for ax in axes] + [scores[axes[0]][idx]]
-                fig_rad.add_trace(go.Scatterpolar(
-                    r=vals, theta=axes+[axes[0]],
-                    fill="toself", name=name,
-                    line=dict(color=PAL[i%len(PAL)],width=2),
-                    fillcolor=hex_rgba(PAL[i%len(PAL)], 0.13),
-                    marker=dict(color=PAL[i%len(PAL)],size=6),
-                ))
-            fig_rad.update_layout(
-                polar=dict(
-                    bgcolor=COLORS["card2"],
-                    radialaxis=dict(visible=True,range=[0,1],
-                                   tickcolor=COLORS["subtext"],
-                                   gridcolor="#1c2230",linecolor="#1c2230"),
-                    angularaxis=dict(tickcolor=COLORS["subtext"],
-                                     gridcolor="#1c2230",linecolor="#1c2230")),
-                showlegend=True, height=380,
-                paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(color=COLORS["text"],family="Inter",size=11),
-                margin=dict(l=30,r=30,t=30,b=30),
-                legend=dict(bgcolor="rgba(13,17,23,0.8)",
-                            bordercolor=COLORS["border"],borderwidth=1,font_size=11),
-            )
-            st.plotly_chart(fig_rad, use_container_width=True)
-
-        with radar_cols[1]:
-            # R² bubble
-            r2_list = [(n,mdata[n]["r2"],mdata[n]["rmse"]) for n in model_names]
-            r2_df = pd.DataFrame(r2_list,columns=["Model","R²","RMSE"])
-            fig_b = px.scatter(r2_df, x="RMSE", y="R²", text="Model",
-                               size=[20]*len(r2_df),
-                               color="R²",
-                               color_continuous_scale=[[0,COLORS["danger"]],[0.5,COLORS["warning"]],[1,COLORS["accent"]]],
-                               labels={"RMSE":"RMSE (°C)","R²":"R²"})
-            fig_b.update_traces(textposition="top center",textfont_size=9,
-                                marker_sizemin=12)
-            if base_rmse:
-                fig_b.add_vline(x=base_rmse,line_dash="dash",
-                                line_color=COLORS["warning"],line_width=1.5)
-            fig_b.update_layout(title="R² vs RMSE",
-                                coloraxis_showscale=False,**_PL)
-            st.plotly_chart(fig_b, use_container_width=True)
-
-        # ── Predicted vs Actual ──────────────────────────────────────────────
-        if model and scaler and proc_df is not None and feat_names:
-            st.markdown("<hr>", unsafe_allow_html=True)
-            sec("🎯 Predicted vs Actual  (full dataset)",
-                "OLS trendline shown in amber · dashed = perfect prediction line")
-            try:
-                Xall = proc_df[[f for f in feat_names if f in proc_df.columns]].values
-                Xsc  = scaler.transform(Xall)
-                yp   = model.predict(Xsc)
-                ya   = proc_df["uhi_intensity"].values
-                color_col = proc_df.get("city_name", pd.Series(["all"]*len(ya)))
-
-                pva_df = pd.DataFrame({"Actual":ya,"Predicted":np.clip(yp,0,None),
-                                       "City":color_col.values if hasattr(color_col,"values") else color_col})
-                sample = pva_df.sample(min(3000,len(pva_df)),random_state=42)
-
-                figPV = go.Figure()
-                cities_uniq = sample["City"].unique()
-                for i,city in enumerate(cities_uniq):
-                    sub = sample[sample["City"]==city]
-                    figPV.add_trace(go.Scatter(
-                        x=sub["Actual"],y=sub["Predicted"],
-                        mode="markers",name=city,
-                        marker=dict(color=PAL[i%len(PAL)],size=4,opacity=0.6,
-                                    line=dict(width=0)),
-                        hovertemplate=(f"<b>{city}</b><br>"
-                                       "Actual: %{x:.2f}°C<br>"
-                                       "Predicted: %{y:.2f}°C<extra></extra>"),
-                    ))
-                # Perfect prediction
-                lim = max(ya.max(), yp.max())*1.05
-                figPV.add_trace(go.Scatter(x=[0,lim],y=[0,lim],
-                                           mode="lines",name="Perfect",
-                                           line=dict(dash="dash",color=COLORS["warning"],width=2),
-                                           showlegend=True))
-                # OLS
-                slope,intercept,r,_,_ = scipy_stats.linregress(ya, np.clip(yp,0,None))
-                xr = np.linspace(0,lim,100)
-                figPV.add_trace(go.Scatter(x=xr,y=slope*xr+intercept,
-                                           mode="lines",name=f"OLS  r={r:.3f}",
-                                           line=dict(color=COLORS["accent"],width=2.5)))
-                figPV_layout = {
-                    key: value for key, value in _PL.items()
-                    if key not in ("xaxis", "yaxis")
-                }
-                figPV.update_layout(
-                    title=f"Predicted vs Actual UHI — {best}  (all {len(pva_df):,} rows)",
-                    xaxis_title="Actual UHI (°C)",yaxis_title="Predicted UHI (°C)",
-                    xaxis=dict(**_PL["xaxis"],range=[0,lim]),
-                    yaxis=dict(**_PL["yaxis"],range=[0,lim]),
-                    **figPV_layout)
-                st.plotly_chart(figPV, use_container_width=True)
-            except Exception as e:
-                st.info(f"Predicted vs Actual not available: {e}")
-
-        # ── Residuals analysis ───────────────────────────────────────────────
-        if model and scaler and proc_df is not None and feat_names:
-            st.markdown("<hr>", unsafe_allow_html=True)
-            sec("📐 Residual Analysis",
-                "Error distribution · per-city breakdown · ideal residuals cluster around zero")
-            try:
-                Xr   = proc_df[[f for f in feat_names if f in proc_df.columns]].values
-                yp_r = model.predict(scaler.transform(Xr))
-                ya_r = proc_df["uhi_intensity"].values
-                res  = ya_r - np.clip(yp_r, 0, None)
-
-                ra, rb, rc = st.columns(3)
-                with ra:
-                    # Residual histogram
-                    x_hist = np.linspace(res.min(), res.max(), 200)
-                    mu_r, std_r = res.mean(), res.std()
-                    pdf_r = scipy_stats.norm.pdf(x_hist, mu_r, std_r) * len(res) * (res.max()-res.min())/40
-                    fig_res = go.Figure()
-                    fig_res.add_trace(go.Histogram(
-                        x=res, nbinsx=40, name="Residuals",
-                        marker_color=COLORS["primary"], opacity=0.75,
-                        marker_line_color=COLORS["card"], marker_line_width=0.5,
-                    ))
-                    fig_res.add_trace(go.Scatter(
-                        x=x_hist, y=pdf_r, mode="lines", name="Normal fit",
-                        line=dict(color=COLORS["secondary"], width=2.5),
-                    ))
-                    fig_res.add_vline(x=0, line_dash="dash",
-                                      line_color=COLORS["warning"], line_width=1.5)
-                    fig_res.update_layout(
-                        title=f"Residuals  μ={mu_r:.3f}  σ={std_r:.3f}",
-                        xaxis_title="Actual − Predicted (°C)",
-                        showlegend=True, height=300, **_PL)
-                    st.plotly_chart(fig_res, use_container_width=True)
-
-                with rb:
-                    # Residuals vs Predicted scatter
-                    fig_rvp = go.Figure(go.Scatter(
-                        x=np.clip(yp_r, 0, None), y=res,
-                        mode="markers",
-                        marker=dict(
-                            color=res, colorscale=[[0,COLORS["danger"]],[0.5,COLORS["subtext"]],[1,COLORS["accent"]]],
-                            size=3, opacity=0.5, showscale=False,
-                        ),
-                        hovertemplate="Pred: %{x:.2f}°C<br>Residual: %{y:.2f}°C<extra></extra>",
-                    ))
-                    fig_rvp.add_hline(y=0, line_dash="dash",
-                                      line_color=COLORS["warning"], line_width=1.5)
-                    fig_rvp.update_layout(
-                        title="Residuals vs Predicted",
-                        xaxis_title="Predicted UHI (°C)",
-                        yaxis_title="Residual (°C)",
-                        height=300, **_PL)
-                    st.plotly_chart(fig_rvp, use_container_width=True)
-
-                with rc:
-                    # Per-city MAE bar
-                    if "city_name" in proc_df.columns:
-                        city_err = pd.DataFrame({
-                            "city": proc_df["city_name"].values,
-                            "abs_err": np.abs(res),
-                        }).groupby("city")["abs_err"].mean().sort_values(ascending=True)
-                        bar_ec = [COLORS["accent"] if v < city_err.median()
-                                  else COLORS["danger"] for v in city_err.values]
-                        fig_ce = go.Figure(go.Bar(
-                            x=city_err.values, y=city_err.index,
-                            orientation="h", marker_color=bar_ec,
-                            text=city_err.values.round(3),
-                            textposition="outside", textfont_color=COLORS["subtext"],
-                            hovertemplate="<b>%{y}</b><br>MAE: %{x:.3f}°C<extra></extra>",
-                        ))
-                        fig_ce.update_layout(
-                            title="Per-city MAE (green=below median)",
-                            xaxis_title="MAE (°C)", height=300, **_PL)
-                        st.plotly_chart(fig_ce, use_container_width=True)
-
-                # Summary stats
-                mae_r  = np.mean(np.abs(res))
-                rmse_r = np.sqrt(np.mean(res**2))
-                st.markdown(f"""
-                <div class="res-note" style="margin-top:0.2rem">
-                    Test residuals — MAE <b style="color:{COLORS['primary']}">{mae_r:.4f} °C</b>
-                    · RMSE <b style="color:{COLORS['primary']}">{rmse_r:.4f} °C</b>
-                    · Skewness <b style="color:{COLORS['subtext']}">{float(pd.Series(res).skew()):.3f}</b>
-                    · Kurtosis <b style="color:{COLORS['subtext']}">{float(pd.Series(res).kurtosis()):.3f}</b>
-                </div>""", unsafe_allow_html=True)
-            except Exception as e:
-                st.info(f"Residual analysis unavailable: {e}")
-
-        # ── Feature importance ───────────────────────────────────────────────
+        # ── Held-out residuals ───────────────────────────────────────────────
         st.markdown("<hr>", unsafe_allow_html=True)
-        sec("🔍 Feature Importance")
-        fi_col1,_ = st.columns([1,3])
-        with fi_col1:
-            fi_model = st.selectbox("Model",list(mdata.keys()),
-                                    index=list(mdata.keys()).index(best)
-                                    if best in mdata else 0)
-        fi = mdata[fi_model].get("feature_importance",{})
-        if fi:
-            fi_df=(pd.DataFrame(list(fi.items()),columns=["Feature","Importance"])
-                   .sort_values("Importance",ascending=True).tail(15))
-            median_imp = fi_df["Importance"].median()
-            bar_fi=[COLORS["secondary"] if v>median_imp else COLORS["primary"]
-                    for v in fi_df["Importance"]]
-            figFI=go.Figure(go.Bar(
-                x=fi_df["Importance"],y=fi_df["Feature"],orientation="h",
-                marker_color=bar_fi,
-                text=fi_df["Importance"].map(lambda v:f"{v:.4f}"),
-                textposition="outside",textfont_color=COLORS["subtext"],
-                hovertemplate="<b>%{y}</b><br>Importance: %{x:.5f}<extra></extra>",
-            ))
-            figFI.update_layout(title=f"Top-15 Features — {fi_model}",
-                                xaxis_title="Normalised Importance",**_PL)
-            st.plotly_chart(figFI, use_container_width=True)
-        else:
-            st.info("Feature importance not available for this model type.")
+        sec("📐 " + residual_label("heldout_nested_cv"),
+            "residual = observed UHI − predicted UHI, from out-of-fold predictions for the "
+            "held-out city only")
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            res_model = st.selectbox("Evaluated model", list(MODEL_DISPLAY_NAMES),
+                                     index=2, format_func=MODEL_DISPLAY_NAMES.get)
+        with rc2:
+            city_opts = ["All held-out cities"] + sorted(ev_p["city"].unique())
+            res_city = st.selectbox("Held-out city", city_opts)
+        sub = ev_p[ev_p["model_name"] == res_model]
+        if res_city != "All held-out cities":
+            sub = sub[sub["city"] == res_city]
+        res = sub["residual"].to_numpy()
+        r_mae  = float(np.mean(np.abs(res)))
+        r_rmse = float(np.sqrt(np.mean(res ** 2)))
+        st.markdown(f"""<div class="res-note" style="margin-bottom:0.6rem">
+            {residual_label("heldout_nested_cv")} — model <b style="color:{COLORS['primary']}">
+            {MODEL_DISPLAY_NAMES[res_model]}</b> · city <b>{res_city}</b> ·
+            <b>{len(res):,}</b> valid observed targets · MAE <b style="color:{COLORS['primary']}">{r_mae:.3f} °C</b>
+            · RMSE <b style="color:{COLORS['primary']}">{r_rmse:.3f} °C</b> · mean residual {res.mean():+.3f} °C.
+            Observations within a city share 8-day LST composites and are not independent.</div>""",
+            unsafe_allow_html=True)
+        ra, rb, rc = st.columns(3)
+        with ra:
+            fig_res = go.Figure(go.Histogram(x=res, nbinsx=40, marker_color=COLORS["primary"],
+                                             opacity=0.8, marker_line_color=COLORS["card"],
+                                             marker_line_width=0.5))
+            fig_res.add_vline(x=0, line_dash="dash", line_color=COLORS["warning"], line_width=1.5)
+            fig_res.update_layout(title="Residual distribution", xaxis_title="Observed − Predicted (°C)",
+                                  height=300, **_PL)
+            st.plotly_chart(fig_res, use_container_width=True)
+        with rb:
+            fig_rvp = go.Figure(go.Scatter(
+                x=sub["predicted_uhi"], y=res, mode="markers",
+                marker=dict(color=res, colorscale=[[0, COLORS["danger"]], [0.5, COLORS["subtext"]],
+                                                   [1, COLORS["accent"]]], cmid=0,
+                            size=4, opacity=0.55),
+                customdata=sub[["city"]].to_numpy(),
+                hovertemplate="%{customdata[0]}<br>Pred: %{x:.2f}°C<br>Residual: %{y:.2f}°C<extra></extra>"))
+            fig_rvp.add_hline(y=0, line_dash="dash", line_color=COLORS["warning"], line_width=1.5)
+            fig_rvp.update_layout(title="Residual vs predicted", xaxis_title="Predicted UHI (°C)",
+                                  yaxis_title="Residual (°C)", height=300, **_PL)
+            st.plotly_chart(fig_rvp, use_container_width=True)
+        with rc:
+            lo_ax = float(min(sub["observed_uhi"].min(), sub["predicted_uhi"].min())) - 0.5
+            hi_ax = float(max(sub["observed_uhi"].max(), sub["predicted_uhi"].max())) + 0.5
+            fig_pv = go.Figure(go.Scatter(
+                x=sub["observed_uhi"], y=sub["predicted_uhi"], mode="markers",
+                marker=dict(color=COLORS["secondary"], size=4, opacity=0.5),
+                customdata=sub[["city"]].to_numpy(),
+                hovertemplate="%{customdata[0]}<br>Observed: %{x:.2f}°C<br>Predicted: %{y:.2f}°C<extra></extra>"))
+            fig_pv.add_trace(go.Scatter(x=[lo_ax, hi_ax], y=[lo_ax, hi_ax], mode="lines",
+                                        line=dict(dash="dash", color=COLORS["warning"]),
+                                        showlegend=False))
+            fig_pv.update_layout(title="Held-out predicted vs observed",
+                                 xaxis_title="Observed UHI (°C)", yaxis_title="Predicted UHI (°C)",
+                                 height=300, showlegend=False, **_PL)
+            st.plotly_chart(fig_pv, use_container_width=True)
 
-        # ── CV bars ──────────────────────────────────────────────────────────
-        sec("📊 Cross-Validation RMSE ± Std  (GroupKFold · 5 folds)")
-        sorted_m = sorted(mdata.items(),key=lambda x:x[1]["cv_rmse"])
-        figCV = go.Figure()
-        for name,m in sorted_m:
-            figCV.add_trace(go.Bar(
-                name=name, x=[name.replace(" ","<br>")],
-                y=[m["cv_rmse"]],
-                error_y=dict(type="data",array=[m["cv_std"]],
-                             color=COLORS["subtext"],thickness=1.5,width=6),
-                marker_color=COLORS["accent"] if name==best else COLORS["primary"],
-                text=[f"{m['cv_rmse']:.3f}"],textposition="outside",
-                textfont_color=COLORS["subtext"],
-            ))
-        if base_rmse:
-            figCV.add_hline(y=base_rmse,line_dash="dash",
-                            line_color=COLORS["warning"],line_width=2,
-                            annotation_text=f"Baseline {base_rmse}",
-                            annotation_font_color=COLORS["warning"])
-        figCV.update_layout(barmode="group",showlegend=False,
-                            yaxis_title="RMSE (°C)",
-                            title="CV RMSE ± Std — lower + narrower = better",**_PL)
-        st.plotly_chart(figCV, use_container_width=True)
+        # ── Deployment model (separate from evaluation) ──────────────────────
+        dep = ev_m.get("deployment_model")
+        if dep:
+            st.markdown("<hr>", unsafe_allow_html=True)
+            sec("🚀 Deployment model (used by the Prediction tab)",
+                "Selected separately by grouped CV on all cities — its selection score is not a test score")
+            st.markdown(f"""<div class="glass" style="font-size:0.8rem;line-height:1.7">
+                <b style="color:{COLORS['primary']}">{dep['selected_family']}</b> {dep['selected_params']} ·
+                trained on {dep['n_train_observations']:,} observations from {dep['n_train_cities']} cities<br>
+                Selection-CV RMSE {dep['selection_cv_rmse']:.3f} °C —
+                <span style="color:{COLORS['warning']}">{dep['selection_cv_rmse_note']}</span><br>
+                Retained features after fold-local constant/duplicate removal:
+                <span class="mono">{', '.join(dep['retained_features'])}</span></div>""",
+                unsafe_allow_html=True)
+            fi = dep.get("feature_importance", {})
+            if fi:
+                fi_df = (pd.DataFrame(list(fi.items()), columns=["Feature", "Importance"])
+                         .sort_values("Importance", ascending=True).tail(15))
+                figFI = go.Figure(go.Bar(x=fi_df["Importance"], y=fi_df["Feature"], orientation="h",
+                                         marker_color=COLORS["secondary"],
+                                         text=fi_df["Importance"].map(lambda v: f"{v:.3f}"),
+                                         textposition="outside", textfont_color=COLORS["subtext"]))
+                figFI.update_layout(title=f"Normalised |coefficient| / importance — {dep['selected_family']} "
+                                          "(standardised inputs)", **_PL)
+                st.plotly_chart(figFI, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1970,7 +1808,7 @@ elif nav == "🤖  Models":
 # ══════════════════════════════════════════════════════════════════════════════
 elif nav == "🗺️  Heatmap":
     st.markdown('<div style="height:1.5rem"></div>', unsafe_allow_html=True)
-    sec("🗺️ Global UHI Heatmap", "Mean UHI intensity per city across the 180-day observation window")
+    sec("🗺️ Global UHI Heatmap", "Mean observed (signed) UHI per city across the 180-day window · blue = urban cool island")
 
     if proc_df is None:
         st.warning("Run `python main.py` first.")
@@ -1985,7 +1823,9 @@ elif nav == "🗺️  Heatmap":
         if "uhi_intensity" in df_map.columns:
             gcols = (["name","lat","lon"] if "name" in df_map.columns else ["lat","lon"])
             df_agg = (df_map[gcols+["uhi_intensity"]]
-                      .groupby(gcols).mean().reset_index())
+                      .groupby(gcols).mean().reset_index()
+                      .dropna(subset=["uhi_intensity"]))   # cities with no observed LST
+            df_agg["|UHI|"] = df_agg["uhi_intensity"].abs() + 0.2  # marker size; colour keeps sign
 
             ctrl, map_area = st.columns([1,4])
             with ctrl:
@@ -2013,13 +1853,14 @@ elif nav == "🗺️  Heatmap":
 
             df_filt = df_agg[df_agg["uhi_intensity"].between(uhi_rng[0],uhi_rng[1])]
             with map_area:
-                cs = [[0,COLORS["accent"]],[0.4,COLORS["warning"]],[1,COLORS["danger"]]]
+                cs = [[0,COLORS["primary"]],[0.5,"#e6edf3"],[1,COLORS["danger"]]]  # diverging at 0 °C
                 if mtype == "Scatter":
                     figM = px.scatter_mapbox(
                         df_filt, lat="lat", lon="lon",
-                        color="uhi_intensity", size="uhi_intensity",
+                        color="uhi_intensity", size="|UHI|",
+                        color_continuous_midpoint=0,
                         hover_name="name" if "name" in df_filt.columns else None,
-                        hover_data={"uhi_intensity":":.2f","lat":False,"lon":False},
+                        hover_data={"uhi_intensity":":.2f","lat":False,"lon":False,"|UHI|":False},
                         color_continuous_scale=cs, size_max=32,
                         zoom=1.1, mapbox_style=mtheme)
                 else:
@@ -2087,7 +1928,8 @@ elif nav == "🗺️  Heatmap":
 elif nav == "🔮  Prediction":
     st.markdown('<div style="height:1.5rem"></div>', unsafe_allow_html=True)
     sec("🔮 Live UHI Prediction",
-        "Sliders update instantly · all 26 engineered features computed in real time")
+        "Deployment pipeline (raw features in, its own fitted preprocessing) · predictions "
+        "can be negative (urban cool island)")
 
     if model is None or scaler is None or feat_names is None:
         st.error("No trained model found. Run `python main.py` first.")
@@ -2147,9 +1989,10 @@ elif nav == "🔮  Prediction":
                 vec  = build_input(temperature, humidity, wind_speed,
                                    ndvi, urban_frac, lat, lon,
                                    hour, month, pressure, clouds, feat_names)
-                pred = float(max(0.0, model.predict(scaler.transform([vec]))[0]))
+                pred = float(predict_uhi([vec])[0])
 
-                if pred < 1:   sev,sc,sbg = "Low",     COLORS["accent"],  "rgba(63,185,80,0.1)"
+                if pred < 0:   sev,sc,sbg = "Cool-island",COLORS["primary"],"rgba(88,166,255,0.1)"
+                elif pred < 1: sev,sc,sbg = "Low",     COLORS["accent"],  "rgba(63,185,80,0.1)"
                 elif pred < 2: sev,sc,sbg = "Moderate",COLORS["warning"], "rgba(210,153,34,0.1)"
                 elif pred < 4: sev,sc,sbg = "High",    COLORS["danger"],  "rgba(248,81,73,0.1)"
                 else:          sev,sc,sbg = "Extreme", "#ff6b6b",         "rgba(255,107,107,0.12)"
@@ -2168,25 +2011,25 @@ elif nav == "🔮  Prediction":
                         </span>
                     </div>
                     <div style="margin-top:1rem;font-size:0.68rem;color:{COLORS['subtext']}">
-                        Model: <b style="color:{COLORS['primary']}">{metrics['best_model'] if metrics else '—'}</b>
-                        &nbsp;·&nbsp; RMSE: <b style="color:{COLORS['primary']}">{metrics['best_rmse'] if metrics else '—'}°C</b>
+                        Model: <b style="color:{COLORS['primary']}">{(metrics or {}).get('deployment_model',{}).get('selected_family','—')}</b>
+                        &nbsp;·&nbsp; typical error on an unseen city (nested LOCO, macro RMSE):
+                        <b style="color:{COLORS['primary']}">{f"{sel_metric(metrics,'macro_rmse'):.2f}" if metrics else '—'}°C</b>
                     </div>
                 </div>""", unsafe_allow_html=True)
 
                 # Gauge
                 figG = go.Figure(go.Indicator(
-                    mode="gauge+number+delta",
+                    mode="gauge+number",
                     value=pred,
                     number={"suffix":" °C","font":{"size":32,"color":COLORS["text"]}},
-                    delta={"reference":metrics.get("baseline_rmse",2.0) if metrics else 2.0,
-                           "valueformat":".2f","font":{"size":13}},
                     gauge={
-                        "axis":{"range":[0,8],"tickwidth":1,
+                        "axis":{"range":[min(-4.0, pred),max(8.0, pred)],"tickwidth":1,
                                 "tickcolor":COLORS["subtext"],"nticks":9},
                         "bar":{"color":sc,"thickness":0.25},
                         "bgcolor":COLORS["card2"],
                         "bordercolor":COLORS["border"],"borderwidth":1,
                         "steps":[
+                            {"range":[min(-4.0, pred),0],"color":"rgba(88,166,255,0.18)"},
                             {"range":[0,1],"color":"rgba(63,185,80,0.18)"},
                             {"range":[1,2],"color":"rgba(210,153,34,0.18)"},
                             {"range":[2,4],"color":"rgba(248,81,73,0.18)"},
@@ -2237,8 +2080,8 @@ elif nav == "🔮  Prediction":
 
                 # ── Feature contributions (scaled values) ──────────────────
                 st.markdown(f'<div class="sec-head" style="font-size:1rem;margin-top:0.6rem">'
-                            f'Scaled Feature Inputs</div>', unsafe_allow_html=True)
-                scaled_vec = scaler.transform([vec])[0]
+                            f'Standardised Feature Inputs (display only)</div>', unsafe_allow_html=True)
+                scaled_vec = scaler.transform(np.atleast_2d(np.asarray(vec, dtype=float)))[0]
                 render_feature_contributions(scaled_vec, feat_names)
 
             except Exception as e:
@@ -2269,23 +2112,20 @@ elif nav == "🔮  Prediction":
                          ndvi_val=ndvi,uf=urban_frac,lat=lat,lon=lon,
                          hour=hour,month=month,pressure=pressure,clouds=clouds)
             bkey  = PARAM_MAP[vary]
-            psa   = []
-            for v in pr:
-                vec_sa = build_input(**{**base,bkey:v},feat_names=feat_names)
-                psa.append(max(0.0,float(model.predict(scaler.transform([vec_sa]))[0])))
+            psa   = predict_uhi([build_input(**{**base,bkey:v},feat_names=feat_names)
+                                 for v in pr]).tolist()
 
             cur = base.get(bkey)
             figSA = go.Figure()
             # Fill area coloured by UHI level
             figSA.add_trace(go.Scatter(
-                x=pr,y=psa,mode="lines",fill="tozeroy",
+                x=pr,y=psa,mode="lines",
                 line=dict(color=COLORS["primary"],width=2.5),
                 fillcolor="rgba(88,166,255,0.07)",
                 hovertemplate=f"<b>{vary}</b>: %{{x:.2f}}<br>UHI: %{{y:.3f}}°C<extra></extra>",
             ))
             if cur is not None and lo<=cur<=hi:
-                cur_p = max(0.0,float(model.predict(
-                    scaler.transform([build_input(**{**base,bkey:cur},feat_names=feat_names)]))[0]))
+                cur_p = float(predict_uhi([build_input(**{**base,bkey:cur},feat_names=feat_names)])[0])
                 figSA.add_vline(x=cur,line_dash="dash",
                                line_color=COLORS["secondary"],line_width=2,
                                annotation_text=f"current {cur:.2f}",
@@ -2312,15 +2152,13 @@ elif nav == "🔮  Prediction":
                 t_range  = np.linspace(-5.0, 50.0, 35)
                 uf_range = np.linspace(0.0,  1.0,  35)
                 T_grid, UF_grid = np.meshgrid(t_range, uf_range)
-                Z_grid = np.zeros_like(T_grid)
                 base3d = dict(hum=humidity, wind=wind_speed, ndvi_val=ndvi,
                               lat=lat, lon=lon, hour=hour, month=month,
                               pressure=pressure, clouds=clouds)
-                for i in range(len(uf_range)):
-                    for j in range(len(t_range)):
-                        v3d = build_input(temp=float(T_grid[i,j]), uf=float(UF_grid[i,j]),
-                                          **base3d, feat_names=feat_names)
-                        Z_grid[i,j] = max(0.0, float(model.predict(scaler.transform([v3d]))[0]))
+                Z_grid = predict_uhi([
+                    build_input(temp=float(t), uf=float(u), **base3d, feat_names=feat_names)
+                    for t, u in zip(T_grid.ravel(), UF_grid.ravel())
+                ]).reshape(T_grid.shape)
 
                 fig3d = go.Figure(go.Surface(
                     x=T_grid, y=UF_grid, z=Z_grid,
@@ -2334,9 +2172,8 @@ elif nav == "🔮  Prediction":
                     hovertemplate="Temp: %{x:.1f}°C<br>Urban Frac: %{y:.2f}<br>UHI: %{z:.2f}°C<extra></extra>",
                 ))
                 # Mark current slider position
-                cur_z = max(0.0, float(model.predict(
-                    scaler.transform([build_input(temp=temperature, uf=urban_frac,
-                                                  **base3d, feat_names=feat_names)]))[0]))
+                cur_z = float(predict_uhi([build_input(temp=temperature, uf=urban_frac,
+                                                       **base3d, feat_names=feat_names)])[0])
                 fig3d.add_trace(go.Scatter3d(
                     x=[temperature], y=[urban_frac], z=[cur_z+0.05],
                     mode="markers+text",
@@ -2382,10 +2219,13 @@ elif nav == "🔮  Prediction":
                 try:
                     city_profiles = (proc_df.groupby("city_name")
                                      [[f for f in feat_names if f in proc_df.columns]]
-                                     .mean())
+                                     .mean()
+                                     .reindex(columns=feat_names))
+                    _has_obs = proc_df.groupby("city_name")["uhi_intensity"].count()
+                    city_profiles = city_profiles.loc[_has_obs.loc[city_profiles.index] > 0]
                     # Scale to match user vector
-                    user_scaled = np.array(scaler.transform([vec])[0])
-                    city_scaled = scaler.transform(city_profiles.values)
+                    user_scaled = np.array(scaler.transform(np.atleast_2d(np.asarray(vec, dtype=float)))[0])
+                    city_scaled = scaler.transform(city_profiles.to_numpy(float))
                     distances   = np.linalg.norm(city_scaled - user_scaled, axis=1)
                     top5_idx    = distances.argsort()[:5]
                     cities_top5 = city_profiles.index[top5_idx]
@@ -2419,7 +2259,7 @@ elif nav == "🔮  Prediction":
                     st.markdown(f"""
                     <div class="insight-card" style="--ic:{COLORS['primary']};margin-top:0.6rem">
                         Closest match: <strong>{CITY_EMOJI.get(closest,"🏙")} {closest}</strong><br>
-                        Mean UHI there: <strong>{city_uhi:.2f}°C</strong> ·
+                        Mean observed UHI there: <strong>{city_uhi:.2f}°C</strong> ·
                         Your prediction: <strong>{pred:.2f}°C</strong>
                         <span style="color:{delta_c};font-weight:700"> {arrow} {abs(delta_v):.2f}°C
                         {"hotter" if delta_v>0 else "cooler"}</span>

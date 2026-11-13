@@ -5,6 +5,15 @@ Sources:
   - GEE MODIS MOD13A2                → annual mean NDVI 2023
   - GEE MODIS MOD11A2                → 8-day LST time series (dynamic target)
 No synthetic or random data.  Cities without NDVI are skipped.
+
+An alternative collector that reads the same MODIS products from the
+Microsoft Planetary Computer mirror (no Earth Engine account needed) lives in
+``data_collector_pc.py``; both write the same raw schema.
+
+Target provenance: every row records the 8-day LST composite it was matched to
+(``lst_date``).  Rows whose date is not covered by a composite keep
+``urban_lst``/``rural_lst`` = NaN — they are never filled.  Missing weather
+fields are left as NaN (imputation happens later, inside each CV fold).
 """
 
 import json
@@ -18,11 +27,10 @@ from collections import defaultdict
 from pathlib import Path
 from datetime import datetime, timedelta
 
-import ee
-
 from config import (
     CITIES, OPENWEATHER_API_KEY, OPENWEATHER_BASE_URL,
-    RAW_DATA_PATH, CACHE_DIR, GEE_PROJECT_ID
+    RAW_DATA_PATH, CACHE_DIR, GEE_PROJECT_ID,
+    COLLECTION_START, COLLECTION_END, warn_missing_keys,
 )
 from logger import get_logger
 
@@ -65,7 +73,23 @@ def _load_service_account_info() -> dict | None:
     return info
 
 
+_EE = None
+
+
+def _ee():
+    """Import and initialise Earth Engine lazily (only GEE collection needs it)."""
+    global _EE
+    if _EE is None:
+        import ee as _ee_mod
+
+        _EE = _ee_mod
+        init_gee()
+    return _EE
+
+
 def init_gee() -> None:
+    import ee
+
     service_account_info = _load_service_account_info()
 
     if service_account_info:
@@ -95,8 +119,6 @@ def init_gee() -> None:
         ee.Authenticate()
         ee.Initialize(project=GEE_PROJECT_ID)
 
-
-init_gee()
 
 
 # ─── Cache helpers ────────────────────────────────────────────────────────────
@@ -148,6 +170,7 @@ def fetch_ndvi(lat: float, lon: float) -> float | None:
         return round(float(cached["ndvi"]), 4)
 
     try:
+        ee = _ee()
         point = ee.Geometry.Point(lon, lat)
         dataset = (
             ee.ImageCollection("MODIS/061/MOD13A2")
@@ -193,6 +216,7 @@ def fetch_lst_timeseries(
         return cached["ts"]
 
     try:
+        ee = _ee()
         lst_col = (
             ee.ImageCollection("MODIS/061/MOD11A2")
             .select("LST_Day_1km")
@@ -243,6 +267,7 @@ def fetch_lst_timeseries(
                     "urban_lst": round(vals["urban"], 3),
                     # median of valid surrounding pixels — more stable than min (Fix #5)
                     "rural_lst": round(float(np.median(vals["rural"])), 3),
+                    "n_rural": len(vals["rural"]),
                 }
 
         _save_cache(label, {"ts": ts})
@@ -254,29 +279,47 @@ def fetch_lst_timeseries(
         return {}
 
 
-# ─── Match weather date → nearest LST composite ───────────────────────────────
+# ─── Match weather date → the LST composite that covers it ─────────────────────
+
+LST_COMPOSITE_DAYS = 8
+
+
+def match_to_covering_lst(date_str: str, lst_ts: dict) -> dict | None:
+    """
+    Return the 8-day LST composite whose acquisition period
+    [composite_start, composite_start + 7 days] contains ``date_str``.
+
+    The previous implementation matched the composite with the *nearest start
+    date* (up to 8 days away), which could attach a target from a period that
+    does not cover the weather day.  Returns None when no composite covers the
+    date (the row then has no observed target; it is never imputed).
+    """
+    if not lst_ts:
+        return None
+    try:
+        day = datetime.strptime(date_str[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+    best = None
+    for key in sorted(lst_ts):
+        start = datetime.strptime(key, "%Y-%m-%d")
+        if start <= day < start + timedelta(days=LST_COMPOSITE_DAYS):
+            best = key  # latest composite starting on/before the day
+    if best is None:
+        return None
+    rec = dict(lst_ts[best])
+    rec["lst_date"] = best
+    return rec
+
 
 def match_to_nearest_lst(
     date_str: str, lst_ts: dict
 ) -> tuple[float | None, float | None]:
-    """
-    Find the nearest available 8-day LST composite for a daily weather date.
-    Returns (None, None) if the gap exceeds one composite period (8 days).
-    """
-    if not lst_ts:
+    """Backward-compatible wrapper returning (urban_lst, rural_lst)."""
+    rec = match_to_covering_lst(date_str, lst_ts)
+    if rec is None:
         return None, None
-    try:
-        weather_dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
-        best_key = min(
-            lst_ts.keys(),
-            key=lambda d: abs((weather_dt - datetime.strptime(d, "%Y-%m-%d")).days),
-        )
-        gap = abs((weather_dt - datetime.strptime(best_key, "%Y-%m-%d")).days)
-        if gap > 8:
-            return None, None
-        return lst_ts[best_key]["urban_lst"], lst_ts[best_key]["rural_lst"]
-    except Exception:
-        return None, None
+    return rec["urban_lst"], rec["rural_lst"]
 
 
 # ─── Open-Meteo: free historical weather (ERA5 reanalysis) ────────────────────
@@ -326,8 +369,9 @@ def fetch_openmeteo_history(city: dict, start_date: str, end_date: str) -> list[
                 "temperature": round(float(t), 2),
                 "humidity":    round(float(h), 1),
                 "wind_speed":  round(float(w) / 3.6, 2),  # km/h → m/s
-                "pressure":    round(float(p), 1) if p else 1013.0,
-                "clouds":      int(round(float(c))) if c else 50,
+                # Missing values stay NaN; they are imputed fold-locally later.
+                "pressure":    round(float(p), 1) if p is not None else np.nan,
+                "clouds":      round(float(c), 1) if c is not None else np.nan,
                 "timestamp":   f"{date_str}T12:00:00",
             })
 
@@ -377,21 +421,27 @@ def fetch_openweather_current(city: dict) -> dict | None:
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
-def collect_data(force: bool = False, cities: list[dict] | None = None) -> pd.DataFrame:
+def collect_data(
+    force: bool = False,
+    cities: list[dict] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
     if RAW_DATA_PATH.exists() and not force:
         log.info(f"Raw data exists. Loading ...")
         return pd.read_csv(RAW_DATA_PATH)
 
     log.info("=" * 60)
     log.info("STEP 1 – DATA COLLECTION")
+    warn_missing_keys()
     log.info("=" * 60)
 
-    # 180-day window, ending 30 days ago so MODIS is fully available (Fix #7)
-    end_dt   = datetime.utcnow() - timedelta(days=30)
-    start_dt = end_dt - timedelta(days=179)
-    start_str = start_dt.strftime("%Y-%m-%d")
-    end_str   = end_dt.strftime("%Y-%m-%d")
-    log.info(f"  Window: {start_str} to {end_str}  ({180} days)")
+    # Fixed, configurable window (config.COLLECTION_START/END) so a collection
+    # run is reproducible.  The old rolling "today − 30 days" window changed
+    # the dataset on every run.
+    start_str = start_date or COLLECTION_START
+    end_str   = end_date or COLLECTION_END
+    log.info(f"  Window: {start_str} to {end_str}")
 
     rows = []
 
@@ -426,11 +476,14 @@ def collect_data(force: bool = False, cities: list[dict] | None = None) -> pd.Da
         # ── 5. Match each daily row to nearest 8-day LST composite ───────
         city_rows = 0
         for rec in weather_rows:
-            urban_lst, rural_lst = match_to_nearest_lst(rec["timestamp"][:10], lst_ts)
+            m = match_to_covering_lst(rec["timestamp"][:10], lst_ts)
             rec["ndvi"]           = ndvi
             rec["urban_fraction"] = urban_fraction
-            rec["urban_lst"]      = urban_lst     # None if no composite nearby
-            rec["rural_lst"]      = rural_lst
+            # None when no composite covers the day — never filled later
+            rec["urban_lst"]      = m["urban_lst"] if m else None
+            rec["rural_lst"]      = m["rural_lst"] if m else None
+            rec["n_rural_valid"]  = m.get("n_rural") if m else None
+            rec["lst_date"]       = m["lst_date"] if m else None
             rec["source"]         = "openmeteo+gee"
             rows.append(rec)
             city_rows += 1
